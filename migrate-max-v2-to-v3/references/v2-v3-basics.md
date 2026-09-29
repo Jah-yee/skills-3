@@ -157,7 +157,6 @@ from max.experimental.tensor import Tensor
 from max.experimental.sharding import (
     DeviceMapping,
     DeviceMesh,
-    PlacementMapping,
     Sharded,
 )
 
