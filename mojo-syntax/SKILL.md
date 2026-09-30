@@ -1,6 +1,6 @@
 ---
 name: mojo-syntax
-description: Help to write Mojo code using current syntax and conventions. Always use this skill when writing any Mojo code, including when other Mojo-specific skills (e.g., mojo-gpu-fundamentals) also apply. Use when writing Mojo code, translating projects to Mojo, or otherwise generating Mojo. Use this skill to overcome misconceptions with how Mojo is written.
+description: Help to write Mojo code using current syntax and conventions. Always use this skill when writing any Mojo code, including when other Mojo-specific skills (e.g., mojo-gpu-fundamentals) also apply. Use when writing or reviewing Mojo code, translating projects to Mojo, or otherwise generating Mojo. Use this skill to overcome misconceptions with how Mojo is written.
 ---
 
 <!-- EDITORIAL GUIDELINES FOR THIS SKILL FILE
@@ -25,6 +25,12 @@ compile.**
 
 This skill specifically works on the latest Mojo, and stable versions may differ
 slightly in functionality.
+
+Compiling isn't the bar for review. Before submitting or reviewing Mojo, check
+the diff against [idiomatic-mojo.md](references/idiomatic-mojo.md): the style
+rules code reviewers flag most often (open-coded helpers, redundant casts,
+over-specified parameters, `IndexList` instead of tuples, missing `comptime`,
+unneeded `rebind`, mutable origins on inputs).
 
 ## Removed syntax — DO NOT generate these
 
