@@ -321,7 +321,7 @@ _ = Atomic.fetch_add(output_ptr, value)      # atomic add
 # Reductions — result broadcast to every lane
 warp.sum(val)         warp.max(val)         warp.min(val)
 warp.broadcast(val)                          # lane-0 value → all lanes
-warp.reduce[warp.shuffle_down, reduce_fn](val)  # custom reduction (broadcasts)
+warp.reduce[warp.shuffle_down](val, reduce_fn)  # custom reduction (broadcasts)
 
 # Shuffles — per-lane shift/swap, NOT broadcast
 warp.shuffle_down(val, offset)               # offset: UInt32
