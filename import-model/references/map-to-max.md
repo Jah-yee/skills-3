@@ -20,6 +20,12 @@ installed MAX package.
 
 ## Decision table
 
+These are mostly V2 architectures. A new port is ModuleV3: use the row to
+find the family, then start from its `_modulev3` sibling where one exists
+(`llama3_modulev3`, `qwen3_modulev3`, `gemma3_modulev3`, `phi3_modulev3`,
+`granite_modulev3`, `deepseekV3_modulev3`, `gpt_oss_modulev3`) or from
+`olmo3`.
+
 Map the `config.json` findings to a starting arch:
 
 | HF signal                                      | Starting arch                                         |
@@ -44,9 +50,9 @@ routing scheme, or recurrence with non-standard memory), no template will
 match. Two paths:
 
 - Pick the closest decoder and write the unique pieces from scratch with
-  the lane's primitives (`max.nn` on V2, `max.experimental.nn` on
-  ModuleV3). Accept that the scaffold-stage parity check will
-  fail until you replace the divergent module.
+  ModuleV3 primitives (`max.experimental.nn`). Accept that the
+  scaffold-stage parity check will fail until you replace the divergent
+  module.
 - See [recognize-walls.md](recognize-walls.md): some architectures aren't
   portable with the public MAX surface today.
 

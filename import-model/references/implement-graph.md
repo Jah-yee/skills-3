@@ -97,7 +97,7 @@ are identical to HF. When the delta list flagged a difference:
 - **Block wiring differs**: rewrite the block class; do not inherit donor
   `forward()` if norm/residual order differs.
 - **New attention pattern** (MLA, sliding window per layer index, NoPE on some
-  layers): new attention module using the lane's primitives.
+  layers): new attention module using ModuleV3 primitives.
 
 Do not copy-paste the donor `<slug>.py` and change the class name. Walk HF
 `forward()` and implement what it does.

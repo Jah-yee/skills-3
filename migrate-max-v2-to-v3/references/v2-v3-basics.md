@@ -75,8 +75,9 @@ class Linear(Module):
 ```
 
 - ModuleV3 uses default `device` and `dtype` contexts. Move a module
-  with `module.to(device)` after construction, or call `.to()` on the
-  tensor directly.
+  to one device with `module.to(device)` after construction, or call
+  `.to()` on the tensor directly. `Module.to()` rejects a multi-device
+  mesh; see the distributed section below.
 - There is no `Weight` class. Weights are `Tensor` objects, created
   with `Tensor.zeros()`, `max.experimental.random.*`, and friends.
 - `__call__()` becomes `forward()`.
@@ -129,6 +130,14 @@ assigns the mesh before compilation (`kimik2_5_modulev3/model.py` in
 
 ```python
 llm.mesh = DeviceMesh(tuple(self.devices), (n_devices,), (axis_name,))
+```
+
+The model is then constructed inside `default_device(mesh)`, so each
+weight is created on the mesh with its placement:
+
+```python
+with F.lazy(), default_dtype(dtype), default_device(llm.mesh):
+    language_nn = KimiK2_5MoEDecoder(llm, kv_params, ep_batch_manager)
 ```
 
 - The `devices` list becomes a `DeviceMesh`, and a `"tp"` axis name is a

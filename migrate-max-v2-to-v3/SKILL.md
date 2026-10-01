@@ -100,7 +100,7 @@ from max.nn.attention import MHAMaskVariant
   specific types; use `...` only when `forward()` has `*args`.
 - Layer constructors take keyword args and drop `dtype=` and `device=`;
   V3 uses default dtype and device contexts, and `model.to(device)` moves
-  the module after construction.
+  the module to one device after construction.
 - `LayerList` becomes `ModuleList` from `max.experimental.nn.sequential`.
   `ModuleList` subclasses `list`, so it takes a single iterable:
   `ModuleList(layers)`; `ModuleList(*layers)` raises `TypeError`.
@@ -196,10 +196,12 @@ linear = row_parallel(Linear(in_dim, out_dim))
 ```
 
 `col_parallel()` and `row_parallel()` set which mesh axis each weight
-dimension shards over; there is no per-device module list. `Signals` and
-`.shard()` have no V3 equivalent: keep those imports only when the class
-is TensorValue-free, or drop the multi-GPU path from the V3 variant and
-revisit when V3 grows an equivalent.
+dimension shards over; there is no per-device module list. Construct the
+model inside `default_device(mesh)`; `model.to(mesh)` raises for a
+multi-device mesh. `Signals` and `.shard()` have no V3 equivalent: keep
+those imports only when the class is TensorValue-free, or drop the
+multi-GPU path from the V3 variant and revisit when V3 grows an
+equivalent.
 
 ### 10. Verify against V2
 
@@ -217,6 +219,7 @@ migrations to read:
 
 - Single-GPU V3: `olmo3/`, `gpt_oss_modulev3/`, `llama3_modulev3/`
 - Sharded V3: `kimik2_5_modulev3/`, `gemma3_modulev3/`, `deepseekV3_modulev3/`
+- Hybrid attention with recurrent state: `nemotron_h_modulev3/`
 - V2 for comparison: `gpt_oss/`, `llama3/`
 
 ## When there is no `Tensor` equivalent

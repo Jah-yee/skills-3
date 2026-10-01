@@ -3,8 +3,8 @@ name: import-model
 description: >
   Use when importing a new model architecture into MAX from a Hugging Face model ID.
   Triggers on: "import a model into MAX", "add model to MAX", "bring up <HF model> in MAX".
-  Workflow: inspect Hugging Face config and modeling code, pick the V2 graph or
-  ModuleV3 lane, scaffold from a similar MAX architecture, implement each layer to
+  Workflow: inspect Hugging Face config and modeling code, build on ModuleV3,
+  scaffold from a similar ModuleV3 architecture, implement each layer to
   match HF, serve, then verify against the Hugging Face reference. When the server
   runs but output is wrong (gibberish,
   greedy mismatch, coherent-then-diverges), load debug-model for the
@@ -152,33 +152,31 @@ reference, FP8/FP4-only released weights, ALiBi, recurrence or state-space
 layers; see [recognize-walls.md](references/recognize-walls.md) before going
 further. Some models can't be ported with the public MAX surface alone.
 
-### Pick the implementation lane
+### Build on ModuleV3
 
-MAX has two model APIs, and the port lands on one of them. The V2 graph
-API (`max.nn` layers, `TensorValue`, an explicit `Graph`) is what most
-registered architectures use today. ModuleV3 (`max.experimental.nn`,
-`Tensor`, `F.lazy()` + `compile()`) is where the architecture library is
-heading, and it supports mesh sharding. The
-[migrate-max-v2-to-v3](../migrate-max-v2-to-v3/SKILL.md) skill holds the
-concept map for both.
+New ports are built on ModuleV3 (`max.experimental.nn`, `Tensor`,
+`F.lazy()` + `compile()`). Many registered architectures still use the V2
+graph API (`max.nn` layers, `TensorValue`, an explicit `Graph`); read them
+for model logic, but do not start a new port on V2. ModuleV3 supports
+multi-GPU through `max.experimental.sharding`: a `DeviceMesh`,
+`col_parallel()` and `row_parallel()`, with the model built inside
+`default_device(mesh)`.
 
-Pick the lane before choosing a donor; the donor must be on the same lane:
-
-- **ModuleV3**: the default for single-GPU ports and for models that
-  shard through a mesh. Read a V3 reference architecture in your
-  installed MAX package (`max/pipelines/architectures/`) before
-  implementing: `olmo3` for single-GPU, `kimik2_5_modulev3` for TP + EP.
-- **V2**: when the model needs distributed machinery ModuleV3 has no
-  equivalent for yet (`Signals`, `Allreduce`, `.shard()`), or kernels the
-  V3 library hasn't grown. The port serves as V2, and the
-  migrate-max-v2-to-v3 skill can move it later without touching the V2
-  code.
+If the model needs something ModuleV3 does not have yet, add it to the V3
+library, or stop and raise the gap with the user; do not fall back to V2.
+Read a V3 reference architecture in your installed MAX package
+(`max/pipelines/architectures/`) before implementing: `olmo3` for
+single-GPU, `kimik2_5_modulev3` for TP + EP, `nemotron_h_modulev3` for
+hybrid attention with recurrent state. The
+[migrate-max-v2-to-v3](../migrate-max-v2-to-v3/SKILL.md) skill's
+[v2-v3-basics.md](../migrate-max-v2-to-v3/references/v2-v3-basics.md) is the
+concept map.
 
 ### Propose a plan; accept a veto
 
 Before any code, write a short paragraph stating what you'd do by default,
 then wait for the user to confirm or veto. Cover distribution shape, the
-implementation lane you picked, quantization variants, validation depth,
+V3 pieces you need to add, quantization variants, validation depth,
 and hardware target, all derived from what you've already read. Don't
 ask blank questions; state a default and let them push back.
 
@@ -216,7 +214,7 @@ Heuristic HF-signal → donor slug hints are in
 | MoE (sparse experts, top-k routing)                 | `qwen3`           |
 | MLA (latent KV)                                     | `deepseekV3`      |
 
-On the ModuleV3 lane, start from a V3 donor instead: a `_modulev3`
+Most of the slugs above are V2. Start from a V3 donor instead: a `_modulev3`
 architecture (`llama3_modulev3`, `gpt_oss_modulev3`) or a natively-V3 one
 such as `olmo3`. The delta list is then V3-to-HF, and the
 [migrate-max-v2-to-v3](../migrate-max-v2-to-v3/SKILL.md) skill is the V3
@@ -294,7 +292,7 @@ implementation activity executes them in code.
 Full checklist, work order, anti-patterns, and completion criteria:
 [implement-graph.md](references/implement-graph.md).
 
-The references below are the V2 lane treatment. On the ModuleV3 lane,
+The references below were written for the V2 graph API. On ModuleV3,
 `model_config.py`, `weight_adapters.py`, and `arch.py` follow the same
 steps, but `<slug>.py` is a `forward()` over `Tensor` values and
 `model.py` compiles with `F.lazy()` + `compile(weights=...)` instead of
@@ -450,10 +448,6 @@ mismatch, dtype mismatch with the released weights, or nonzero MAX sampling.
 When matching text comes out, the port is done **for greedy text**. Real
 "done" depends on the validation depth picked during planning; pick a tier
 from smoke to logit parity.
-
-If you ported on the V2 lane, the
-[`migrate-max-v2-to-v3`](../migrate-max-v2-to-v3/SKILL.md) skill can move
-the verified port to ModuleV3 without touching the V2 code.
 
 Full HF-comparison recipe, divergence triage, and the validation-tier
 table: [validation-tiers.md](references/validation-tiers.md).

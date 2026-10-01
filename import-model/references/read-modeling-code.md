@@ -183,7 +183,7 @@ Given your delta list, pick an approach:
 | One attention variant (sliding window, MLA, softcap)     | Subclass `Attention`, override `__call__`        |
 | Block layout differs (post-norm, peri-LN)                | Subclass `TransformerBlock`, override `__call__` |
 | Multi-step head                                          | Subclass the top-level model, override the head  |
-| Attention is fundamentally new (recurrence, state-space) | Write from scratch with the lane's primitives     |
+| Attention is fundamentally new (recurrence, state-space) | Write from scratch with ModuleV3 primitives      |
 | MoE routing differs from existing MAX MoE archs          | Write from scratch                               |
 
 Prefer subclassing. Every layer you write from scratch is a layer you can

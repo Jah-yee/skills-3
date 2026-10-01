@@ -1,5 +1,14 @@
 # Multi-GPU distribution-shape patterns
 
+New multi-GPU ports are ModuleV3: a `DeviceMesh`, `col_parallel()` /
+`row_parallel()` placements on the weights, and the model built inside
+`default_device(mesh)`, with no per-device module lists. Read
+`kimik2_5_modulev3` (TP + EP) and the distributed section of
+[v2-v3-basics.md](../../migrate-max-v2-to-v3/references/v2-v3-basics.md).
+The decision rule below (how many GPUs) applies to both APIs; the donor
+table and the base-class material after it describe existing V2
+architectures.
+
 Most decoder ports past ~30B BF16 are multi-GPU. The donor table in
 [map-to-max.md](map-to-max.md) lists archs by *attention/MLP shape*
 (GQA vs MLA vs MoE) but not by *distribution shape* (single-GPU,

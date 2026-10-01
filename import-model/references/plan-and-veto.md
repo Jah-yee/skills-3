@@ -8,12 +8,12 @@ questions; state a default and let them push back.
 The paragraph should cover each of these, derived from what you've
 already read:
 
-- **Implementation lane.** The V2 graph API or ModuleV3; the decision
-  activity in [SKILL.md](../SKILL.md) picks it, and the
+- **API.** ModuleV3, always, for a new port. Name any piece ModuleV3
+  lacks that the model needs (a layer, a distributed primitive, a
+  quantized path) and whether you will add it or need the user to decide;
+  do not propose V2 as the workaround. The
   [migrate-max-v2-to-v3](../../migrate-max-v2-to-v3/SKILL.md) skill holds
-  the concept map. Single-GPU and mesh-sharded models can go ModuleV3;
-  distributed machinery ModuleV3 lacks (`Signals`, `Allreduce`,
-  `.shard()`) keeps the port on the V2 lane.
+  the concept map.
 - **Distribution shape.** Single-GPU dense, multi-GPU tensor-parallel,
   multi-GPU DP+EP (MoE), or text-only port of a multimodal wrapper. The
   rough rule: estimate ``num_params × bytes_per_param`` (with the MoE
@@ -36,7 +36,7 @@ The paragraph reads like a competent colleague proposing a plan, not
 an interviewer collecting requirements. One example shape:
 
 > ``org/LargeMoE-70B-bf16``, a MoE causal LM, text-only (vision wrapper
-> dropped). I'll scaffold from the qwen3 multi-GPU MoE pattern on 4 GPUs,
+> dropped). I'll scaffold from the kimik2_5_modulev3 TP + EP pattern on 4 GPUs,
 > register BF16 only for now (FP8 sibling repo exists but MoE quant has a
 > known MAX gap), and validate with greedy generation + GSM8K + HellaSwag.
 > Go?
@@ -48,7 +48,7 @@ If the user already specified any of these in their initial request,
 take it as given. Don't re-ask.
 
 After they confirm, state the routing decision in one sentence
-("I'll start from the qwen3 multi-GPU MoE pattern, not the llama3
+("I'll start from the kimik2_5_modulev3 TP + EP pattern, not the olmo3
 single-GPU donor, because the BF16 weights need ~400 GB HBM"). That
 gives the user one more chance to catch wrong routing before files
 get rewritten.
