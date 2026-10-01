@@ -327,6 +327,7 @@ def run_seed_pass(
     floors: dict[str, float],
     temperature: float,
     top_p: float,
+    max_tokens: int,
     reasoning_effort: str | None,
     num_concurrent: int,
     heartbeat_interval: int,
@@ -346,6 +347,7 @@ def run_seed_pass(
             num_concurrent=num_concurrent,
             temperature=temperature,
             top_p=top_p,
+            max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
             apply_chat_template=False,
         )
@@ -397,6 +399,7 @@ def build_lm_eval_cmd(
     limit: int,
     temperature: float,
     top_p: float,
+    max_tokens: int,
     num_concurrent: int,
     output_path: Path,
     metadata: str | None,
@@ -453,6 +456,7 @@ def build_lm_eval_cmd(
             generation_args.append(f"temperature={temperature}")
         if top_p != 1:
             generation_args.append(f"top_p={top_p}")
+        generation_args.append(f"max_gen_toks={max_tokens}")
         if generation_args:
             command.extend(["--gen_kwargs", ",".join(generation_args)])
     if metadata:
@@ -544,6 +548,7 @@ def run_lm_eval_full(
     full_limits: dict[str, int],
     temperature: float,
     top_p: float,
+    max_tokens: int,
     num_concurrent: int,
     heartbeat_interval: int,
     metadata_override: str | None,
@@ -565,6 +570,7 @@ def run_lm_eval_full(
             limit,
             temperature,
             top_p,
+            max_tokens,
             num_concurrent,
             output_path,
             metadata,
@@ -648,6 +654,7 @@ def run_direct_http_full(
     full_limits: dict[str, int],
     temperature: float,
     top_p: float,
+    max_tokens: int,
     reasoning_effort: str | None,
     num_concurrent: int,
     heartbeat_interval: int,
@@ -666,6 +673,7 @@ def run_direct_http_full(
             num_concurrent=num_concurrent,
             temperature=temperature,
             top_p=top_p,
+            max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
             apply_chat_template=False,
         )
@@ -840,6 +848,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--num-concurrent", type=positive_int, default=4)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--max-tokens",
+        type=positive_int,
+        default=2048,
+        help=(
+            "Generation budget per item. A reasoning model truncated "
+            "mid-chain scores as a wrong answer, not as a truncation, so "
+            "raise this well above the default for one."
+        ),
+    )
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument(
         "--reasoning-effort",
@@ -995,6 +1013,7 @@ def run(args: argparse.Namespace) -> int:
             floors,
             args.temperature,
             args.top_p,
+            args.max_tokens,
             args.reasoning_effort,
             args.num_concurrent,
             args.heartbeat_interval,
@@ -1027,6 +1046,7 @@ def run(args: argparse.Namespace) -> int:
                 full_limits,
                 args.temperature,
                 args.top_p,
+                args.max_tokens,
                 args.reasoning_effort,
                 args.num_concurrent,
                 args.heartbeat_interval,
@@ -1042,6 +1062,7 @@ def run(args: argparse.Namespace) -> int:
                 full_limits,
                 args.temperature,
                 args.top_p,
+                args.max_tokens,
                 args.num_concurrent,
                 args.heartbeat_interval,
                 args.lm_eval_metadata,

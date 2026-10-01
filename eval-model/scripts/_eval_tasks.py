@@ -279,6 +279,7 @@ class TaskEvaluator(ABC):
         num_concurrent: int = 4,
         temperature: float = 0.0,
         top_p: float = 1.0,
+        max_tokens: int = 2048,
         reasoning_effort: str | None = None,
         apply_chat_template: bool = False,
     ):
@@ -289,6 +290,7 @@ class TaskEvaluator(ABC):
         self.num_concurrent = num_concurrent
         self.temperature = temperature
         self.top_p = top_p
+        self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
         self.apply_chat_template = apply_chat_template
 
@@ -473,7 +475,7 @@ class GenerationEvaluator(TaskEvaluator):
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": 2048,
+            "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "top_p": self.top_p,
         }

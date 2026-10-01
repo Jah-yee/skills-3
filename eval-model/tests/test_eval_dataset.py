@@ -165,17 +165,18 @@ class EvalDatasetTest(unittest.TestCase):
 
     def test_lm_eval_command_uses_tokenizer_and_chat_template(self) -> None:
         command = eval_dataset.build_lm_eval_cmd(
-            "mmlu",
-            self.base_url,
-            "served-alias",
-            "org/tokenizer",
-            5,
-            0.0,
-            1.0,
-            2,
-            Path("/tmp/results"),
-            None,
-            True,
+            task="mmlu",
+            base_url=self.base_url,
+            model="served-alias",
+            tokenizer="org/tokenizer",
+            limit=5,
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=1024,
+            num_concurrent=2,
+            output_path=Path("/tmp/results"),
+            metadata=None,
+            apply_chat_template=True,
         )
         model_args = command[command.index("--model_args") + 1]
         self.assertIn("tokenizer=org/tokenizer", model_args)
@@ -184,20 +185,45 @@ class EvalDatasetTest(unittest.TestCase):
 
     def test_gpqa_uses_completions_backend(self) -> None:
         command = eval_dataset.build_lm_eval_cmd(
-            "gpqa",
-            self.base_url,
-            "test-model",
-            "org/tokenizer",
-            5,
-            0.0,
-            1.0,
-            2,
-            Path("/tmp/results"),
-            None,
-            False,
+            task="gpqa",
+            base_url=self.base_url,
+            model="test-model",
+            tokenizer="org/tokenizer",
+            limit=5,
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=1024,
+            num_concurrent=2,
+            output_path=Path("/tmp/results"),
+            metadata=None,
+            apply_chat_template=False,
         )
         model_backend = command[command.index("--model") + 1]
         self.assertEqual(model_backend, "local-completions")
+
+    def test_generation_task_carries_the_token_cap(self) -> None:
+        """`max_tokens` has to reach `--gen_kwargs` as `max_gen_toks`.
+
+        Only a generation task emits `--gen_kwargs`; a loglikelihood task
+        scores fixed continuations and emits none. gsm8k is the generation
+        case, so it is the one that can catch the cap going missing.
+        """
+        command = eval_dataset.build_lm_eval_cmd(
+            task="gsm8k",
+            base_url=self.base_url,
+            model="served-alias",
+            tokenizer="org/tokenizer",
+            limit=5,
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=1024,
+            num_concurrent=2,
+            output_path=Path("/tmp/results"),
+            metadata=None,
+            apply_chat_template=True,
+        )
+        gen_kwargs = command[command.index("--gen_kwargs") + 1]
+        self.assertIn("max_gen_toks=1024", gen_kwargs)
 
     def test_aime_seed_matches_aime24(self) -> None:
         config = get_task_config("aime")
