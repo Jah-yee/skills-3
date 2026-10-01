@@ -27,6 +27,18 @@ manual ", " string-building loop         ", ".join(items)
 Prefer `vectorize` over hand-written scalar loops, and call LLVM/NVVM
 intrinsics rather than inline assembly.
 
+Vectorized pointer loads and stores default to the scalar alignment, which
+can split them into scalar accesses. Pass the real alignment; the address
+must actually satisfy it, or the access faults:
+
+```mojo
+# WRONG
+var v = ptr.unsafe_load[width=8](off)
+# CORRECT
+comptime align = align_of[SIMD[dtype, 8]]()
+var v = ptr.unsafe_load[width=8, alignment=align](off)
+```
+
 ## 2. Don't cast values that already have the right type
 
 `thread_idx`, `block_idx`, `block_dim`, `grid_dim` fields return `Int`.
@@ -66,6 +78,9 @@ def g[dtype: DType, //, filter_len: Int](...)   # infer-only params before `//`
 Check the parameter's default before dropping it — removing an explicit
 `[2]` where the default is `1` changes behavior.
 
+A default is not a constraint: with `b_type: DType = a_type`, a check
+comparing the two never fires for callers that omit `b_type`.
+
 ## 4. Tuples and variadic `Coord`, not `IndexList`/`Index`
 
 Tuples convert implicitly to coordinate types. A single-element tuple is
@@ -98,6 +113,17 @@ if ctx.api() == "metal":  (runtime)       comptime if ...:   # target/vendor che
 Don't unroll a loop that doesn't benefit — reviewers ask "do you need to
 unroll here?". If a comptime `Float32` math call fails to fold on GPU,
 file an issue rather than silently changing the dtype.
+
+Keep comptime dimensions static all the way into layouts. Dispatch
+heuristics read `static_shape`; passing a comptime value as a runtime
+`Int` erases it and silently routes to a slower path.
+
+```mojo
+# WRONG: N is comptime, but c.static_shape[1] == -1
+var c = TileTensor(ptr, row_major((M, N)))
+# CORRECT
+var c = TileTensor(ptr, row_major((M, Idx[N])))
+```
 
 ## 6. Don't `rebind` unless the types already match
 
@@ -217,7 +243,16 @@ Remaining `raw_load`/`raw_store` uses need a tracking issue.
   `128`.
 - State shape and config assumptions with `comptime assert` /
   `debug_assert`; don't remove existing bounds checks.
-- In tests, use `NaN`/`Inf` sentinels, not arbitrary magic numbers.
+- In tests, use `NaN`/`Inf` sentinels, not arbitrary magic numbers, and
+  use prime and tile-straddling lengths (`13`, `63`/`64`/`65`) so the
+  masking and tail code runs.
+- An out-of-bounds write fix needs a guard band after the output, filled
+  with a value the kernel can't produce and checked afterwards; comparing
+  in-range elements can't see the overrun.
+- Device graph capture replays the host's choices, so host code must not
+  pick a kernel or size a grid from per-request values or from device
+  data copied back to the host, and must handle `M == 0` warmup launches.
+- Declare `MAX_THREADS_PER_BLOCK_METADATA` to match the real block size.
 
 ## 13. Hygiene
 
