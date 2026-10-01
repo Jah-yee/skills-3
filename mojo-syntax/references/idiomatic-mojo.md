@@ -92,12 +92,15 @@ Index(m, n)                               (m, n)
 f(Index(tokens))                          f((tokens,))
 t.load[width=1](IndexList[2](i, k))       t.load((i, k))
 Coord(IndexList[2](a, b))                 Coord(a, b)
+Coord(Idx[1], Idx[5])                     coord[1, 5]
+t.load((Idx[5], Idx[3]))                  t.load(coord[5, 3])
 ```
 
 If a mixed-type tuple fails to unify (e.g. `Tuple[Int, UInt32]`), cast the
 odd element; don't fall back to `IndexList`. `Coord` accepts both
 `Int32`- and `Int64`-backed index lists, so don't add canonicalizing
-conversions.
+conversions. Prefer the `coord` comptime helper for completely static
+shapes and sizes.
 
 ## 5. `comptime` for compile-time-known work
 
@@ -177,11 +180,14 @@ shows which arguments are outputs. Question every `MutAnyOrigin`.
 
 ```mojo
 # WRONG                                        # CORRECT
-src: Pointer[Float32, MutAnyOrigin]            src: Pointer[Float32, ImmutAnyOrigin]
+src: Pointer[Float32, MutAnyOrigin]            src: ImmPointer[Float32, _]
 ```
 
 Loads from immutable data are invariant by default; don't pass
-`invariant=True` or other no-op arguments.
+`invariant=True` or other no-op arguments. Prefer the named type prefixes
+to describe the mutability of the underlying data such as `ImmPointer`,
+`MutPointer`, `ImmTileTensor`, and `MutTileTensor` over the `mut=True`
+or `mut=False` prefix.
 
 ## 8. TileTensor over LayoutTensor and raw pointers
 
@@ -214,6 +220,14 @@ Remaining `raw_load`/`raw_store` uses need a tracking issue.
 - Return a `Tuple` from a helper rather than making callers do `+1, +2`
   offset arithmetic; pack scalar kernel args into one `InlineArray` and
   buffer instead of several buffers or fake `Pointer`s.
+- Prefer t-strings over string concatenation. For example:
+
+  ```mojo
+  # WRONG
+  "expected " + String(expected_dtype) + " but got " + String(actual_dtype)
+  # CORRECT
+  t"expected {expected_dtype} but got {actual_dtype}"
+  ```
 
 ## 10. Naming
 
