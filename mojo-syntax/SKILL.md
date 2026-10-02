@@ -622,8 +622,9 @@ except err:                               # err is Int
     print("error code:", err)
 ```
 
-No `match` statement. `async def` and `await` parse, but async support is
-unfinished and its types are private — do not write async Mojo yet.
+No `match` statement. Async is spelled `__async def` and `__await` (bare
+`async`/`await` are plain identifiers); support is unfinished and its types are
+private — do not write async Mojo yet.
 
 ## Function types and closures
 
