@@ -30,7 +30,8 @@ Compiling isn't the bar for review. Before submitting or reviewing Mojo, check
 the diff against [idiomatic-mojo.md](references/idiomatic-mojo.md): the style
 rules code reviewers flag most often (open-coded helpers, redundant casts,
 over-specified parameters, `IndexList` instead of tuples, missing `comptime`,
-unneeded `rebind`, mutable origins on inputs).
+unneeded `rebind`, mutable origins on inputs, single-vendor gates on generic
+kernels).
 
 ## Removed syntax — DO NOT generate these
 

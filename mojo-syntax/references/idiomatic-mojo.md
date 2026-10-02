@@ -268,7 +268,46 @@ Remaining `raw_load`/`raw_store` uses need a tracking issue.
   data copied back to the host, and must handle `M == 0` warmup launches.
 - Declare `MAX_THREADS_PER_BLOCK_METADATA` to match the real block size.
 
-## 13. Hygiene
+## 13. Write portable kernels; gate only what's vendor-specific
+
+Specializing a kernel for one vendor is fine when it uses that vendor's
+hardware (TMA, WGMMA, tcgen05 on NVIDIA; MFMA, `lgkmcnt` waits on AMD;
+inline asm). A kernel built only from generic primitives (`thread_idx`,
+`block_dim`, `barrier`, `warp.sum`, `WARP_SIZE`, shared memory, TileTensor)
+isn't specific to the vendor it was written on, so don't gate it or its
+test to that vendor by default. This applies in both directions: a kernel
+written and tuned on AMD is no more AMD-only than one written on NVIDIA is
+NVIDIA-only.
+
+```bzl
+# WRONG: generic kernel, gated to whichever vendor it was written on
+gpu_constraints = ["//:nvidia_gpu"],
+gpu_constraints = ["//:amd_gpu"],
+# CORRECT: any GPU (add an Apple `incompatible` select only if it fails there)
+gpu_constraints = ["//:has_gpu"],
+```
+
+- Before adding a vendor gate, run the kernel on the other vendor too (an
+  AMD MI300X/MI355X or NVIDIA H100/B200 dev box, or let the other CI lane
+  run it). If it also has a host path, try dropping the GPU constraint
+  entirely so it runs on every accelerator.
+- When reviewing, if a vendor-gated kernel uses no vendor intrinsics, ask
+  the author to try enabling it for all GPUs, or all accelerators.
+- Keep the vendor-specific part small: put the fast path behind
+  `comptime if is_nvidia_gpu()` / `is_amd_gpu()` and keep a generic
+  fallback, rather than gating the whole kernel.
+- Don't gate generic optimizations on hardware. Vectorized loads and
+  stores, `vectorize`, unrolling, and wider per-thread tiles usually help
+  every vendor, so apply them unconditionally and size them with
+  `simd_width_of` instead of putting them behind `is_nvidia_gpu()` or
+  `is_amd_gpu()`. Gate one only if a benchmark shows it regresses a vendor.
+- If it really fails on another vendor, gate it with a `TODO(<ticket>)`
+  naming the failure (a missing intrinsic or a numerics gap), not just
+  "NVIDIA only" or "AMD only".
+- Don't hard-code one vendor's facts (warp size 32 vs 64, shared memory
+  size) in generic code; see §12.
+
+## 14. Hygiene
 
 - Every temporary hack or API abuse gets a `TODO(<ticket>)` linking a
   filed issue.
