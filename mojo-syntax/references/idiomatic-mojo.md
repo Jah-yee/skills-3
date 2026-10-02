@@ -203,6 +203,23 @@ out.ptr[row * N + col] = v                out[row, col] = v
 src.slice(...)                            src[:h, :w]
 ```
 
+Don't index raw pointers or compute offsets from strides in kernels.
+Some accelerators don't expose raw pointers (their tensors are backed by
+a memref), so `ptr[offset]` and hand-written `i * stride + j` math don't
+port to them. Let TileTensor own the layout: index it by coordinate, and
+use `tile`, `vectorize`, and `distribute` for sub-views instead of
+pointer arithmetic.
+
+```mojo
+# WRONG
+var p = t.unsafe_ptr()
+p[row * row_stride + col] = v
+var tile_ptr = p + (tm * BM) * N + tn * BN
+# CORRECT
+t[row, col] = v
+var tile = t.tile[BM, BN](tm, tn)
+```
+
 Don't use `TileTensor.ptr`. When you do need the pointer, call
 `TileTensor.unsafe_ptr()`, and only when you know the tensor is backed by
 a pointer (not, for example, a memref).
