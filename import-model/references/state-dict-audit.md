@@ -1,191 +1,123 @@
 # State-dict coverage audit at load
 
-``nn_model.load_state_dict(strict=False)`` is mandatory when
-``tie_word_embeddings=True`` (the HF checkpoint omits ``lm_head.weight``
-because it shares with ``embed_tokens.weight``, so strict mode would
-reject the load). But ``strict=False`` has a silent failure mode:
-**any tensor with a name that doesn't match a real module path is
-dropped without warning**.
+`compile(weights=...)` checks the state dict against the module's parameters
+from the parameter side. Every parameter needs a tensor with a matching shape
+and dtype, or compilation raises: `KeyError` for a missing tensor, and
+`ValueError` for a mismatched one. It does not check the other direction. A
+checkpoint tensor whose name matches no parameter is left out without a
+warning.
 
-That's the trapdoor under every weight adapter. A typo in a rename
-table, a stale prefix from a previous port revision, a missing
-sub-module name — the model still loads, still serves, still emits
-real-looking tokens, and only fails at accuracy benchmarks days later.
+Every weight adapter has this gap. Take a typo in a rename table, a stale
+prefix from a previous port revision, or a checkpoint component the module
+never built. In each case the model still compiles, still serves, and still
+emits real-looking tokens. The error shows up only in accuracy benchmarks.
 
-A typical failure: an adapter renames ``mlp.experts.{j}`` →
-``mlp.routed.experts.{j}`` but the graph has MoE at ``self.mlp`` with
-no ``routed`` sub-module. Every routed expert tensor is silently dropped
-under ``strict=False``. Generation can still look plausible if shared
-experts load; accuracy benchmarks surface the gap.
+A typical failure: the checkpoint ships `self_attn.q_norm.weight` and
+`self_attn.k_norm.weight` in every layer, but the port's attention module was
+copied from a donor with no QK-norm. Compilation succeeds because the module
+asks for no norm weights, the norm tensors are dropped, and generation looks
+plausible until an accuracy benchmark exposes the gap.
 
-This reference describes a small audit that catches the entire class
-of bug at load time, in seconds.
+This reference describes an audit that reports every unconsumed checkpoint
+tensor at load time, in seconds.
 
 ## What the audit checks
 
-Don't check exact tensor suffixes. Different weight-type variants
-(BF16, FP8, NVFP4) ship different sidecar tensors per projection:
-
-- BF16: ``X_proj.weight``
-- FP8: ``X_proj.weight`` + ``X_proj.weight_scale``
-- NVFP4: ``X_proj.weight_packed`` + ``X_proj.weight_scale`` +
-  ``X_proj.weight_global_scale`` + ``X_proj.input_global_scale`` +
-  ``X_proj.bias``
-
-A suffix-aware check has to enumerate all of them. A
-**projection-path** check just asks: "is there *any* tensor at
-``layers.{i}.mlp.experts.{j}.gate_proj.*``?" — and that's variant-
-agnostic.
-
-The audit indexes the state dict by "everything up to the last dot,"
-producing a set of projection paths. Then for each expected projection
-(router, every routed expert, every shared expert), it checks
-presence. If any projection has zero tensors, raise with a sample of
-missing paths.
+The audit compares two name sets: the keys the adapter produced, and the
+parameter names the root module yields from `parameters`. Every key with no
+parameter is either a bug or a tensor the port drops on purpose. Dropped
+tensors include a vision tower in a text-only port, or a
+multi-token-prediction head the port doesn't serve. The audit raises on the
+first kind and ignores the second by prefix.
 
 ## Generic implementation
 
-Drop this into your slug's ``model.py``. Call it right after
-``nn_model.load_state_dict(...)`` in ``_build_graph``.
+Add this function to your slug's ``model.py``:
 
 ```python
-def _audit_state_dict_coverage(
+from collections.abc import Iterable
+from collections.abc import Set as AbstractSet
+
+
+def _audit_unconsumed_keys(
     *,
-    state_dict: dict,
-    num_hidden_layers: int,
-    # MoE knobs — set to 0 / None for dense models
-    num_routed_experts: int = 0,
-    num_shared_experts: int = 0,
-    # Attention projections (override if your arch uses non-standard names)
-    attn_projections: tuple[str, ...] = (
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-    ),
-    mlp_projections: tuple[str, ...] = ("gate_proj", "up_proj", "down_proj"),
-    has_router: bool = True,
+    checkpoint_keys: AbstractSet[str],
+    parameter_names: Iterable[str],
+    dropped_prefixes: tuple[str, ...] = (),
 ) -> None:
-    """Verify every expected projection has at least one tensor in state_dict.
+    """Raises if a checkpoint tensor matches no parameter of the module.
 
-    Indexes state_dict keys by projection path (everything up to the last
-    dot) so the check is variant-agnostic: BF16's ``weight``, FP8's
-    ``weight_scale``, NVFP4's ``weight_packed`` etc. all map to the same
-    parent path.
-
-    Raises ``RuntimeError`` listing a sample of missing paths.
+    Keys under ``dropped_prefixes`` belong to components the port leaves out
+    on purpose and are ignored.
     """
-    # Index keys by projection FQN.
-    projection_paths: set[str] = set()
-    for k in state_dict:
-        last_dot = k.rfind(".")
-        if last_dot > 0:
-            projection_paths.add(k[:last_dot])
-
-    missing: list[str] = []
-    for layer_idx in range(num_hidden_layers):
-        # Attention projections
-        for proj in attn_projections:
-            p = f"layers.{layer_idx}.self_attn.{proj}"
-            if p not in projection_paths:
-                missing.append(p)
-
-        if num_routed_experts > 0:
-            # Router (gate → MoEGate.gate_score, hence the deeper path)
-            if has_router:
-                p = f"layers.{layer_idx}.mlp.gate.gate_score"
-                if p not in projection_paths:
-                    missing.append(p)
-            # Routed experts
-            for j in range(num_routed_experts):
-                for proj in mlp_projections:
-                    p = f"layers.{layer_idx}.mlp.experts.{j}.{proj}"
-                    if p not in projection_paths:
-                        missing.append(p)
-            # Shared experts (single MLP per layer)
-            if num_shared_experts > 0:
-                for proj in mlp_projections:
-                    p = f"layers.{layer_idx}.mlp.shared_experts.{proj}"
-                    if p not in projection_paths:
-                        missing.append(p)
-        else:
-            # Dense MLP
-            for proj in mlp_projections:
-                p = f"layers.{layer_idx}.mlp.{proj}"
-                if p not in projection_paths:
-                    missing.append(p)
-
-    if missing:
-        sample = missing[:8]
+    unconsumed = sorted(
+        key
+        for key in checkpoint_keys - set(parameter_names)
+        if not key.startswith(dropped_prefixes)
+    )
+    if unconsumed:
+        sample = unconsumed[:8]
         raise RuntimeError(
-            f"State-dict audit: {len(missing)} expected projection(s) "
-            f"missing from state_dict. Likely cause: stale rename in "
-            f"weight_adapters.py. First {len(sample)}: {sample}"
+            f"State-dict audit: {len(unconsumed)} checkpoint tensor(s) match "
+            f"no module parameter. Likely cause: a stale rename in "
+            f"weight_adapters.py or a component the module doesn't build. "
+            f"First {len(sample)}: {sample}"
         )
 ```
 
+## Where to wire it
+
+`ModuleV3PipelineModelWithKVCache.load_model()` calls `_prepare_state_dict()`
+with the adapted state dict, then builds the module in
+`_instantiate_module()` under `F.lazy()`, then compiles. Record the keys in
+the first hook and audit in the second:
+
+```python
+class MyModel(DonorModel):
+    def _prepare_state_dict(
+        self, state_dict: dict[str, Any], model_config: Any
+    ) -> dict[str, Any]:
+        state_dict = super()._prepare_state_dict(state_dict, model_config)
+        self._checkpoint_keys = frozenset(state_dict)
+        return state_dict
+
+    def _instantiate_module(self, model_config: Any) -> Any:
+        nn_model = MyTopLevelModule(model_config, self.kv_params)
+        nn_model.to(self.devices[0])
+        _audit_unconsumed_keys(
+            checkpoint_keys=self._checkpoint_keys,
+            parameter_names=(name for name, _ in nn_model.parameters),
+        )
+        return nn_model
+```
+
+The module is built lazily, so listing its parameters allocates no weights.
+The audit is set arithmetic over ~10K names and runs once per load.
+
 ## What it catches
 
-- **Adapter rename typos.** ``mlp.routed.experts`` when the real path
-  is ``mlp.experts`` — fires instantly, lists the missing 4096 paths.
-- **Stale prefix.** ``model.text_model.layers`` when only
-  ``model.language_model.layers`` is correct — surfaces as every
-  attention + MLP missing across all layers.
-- **Wrong expert count.** Loading a checkpoint with 64 experts into a
-  graph expecting 128 — surfaces experts 64–127 missing.
-- **Missing layers.** Adapter dropping layers past N (e.g. a slice
-  filter that's off by one) — surfaces the dropped layers.
-- **Sub-module name mismatch.** ``mlp.gate`` (bare) vs
-  ``mlp.gate.gate_score`` (where MAX's ``MoEGate`` actually puts the
-  linear) — surfaces the router as missing.
+- **Adapter rename typos.** ``mlp.routed.experts`` when the module's path is
+  ``mlp.experts``: every routed expert tensor is reported unconsumed, and
+  compilation would also fail on the missing ``mlp.experts`` parameters.
+- **Stale prefix.** ``model.layers`` left unrenamed when the root module
+  expects ``language_model.layers``: every layer tensor is reported.
+- **Components the module never built.** QK-norm, attention biases, shared
+  experts, or a post-feedforward norm that the checkpoint ships and the
+  donor lacks. Compilation alone can't see these.
+- **Wrong expert count.** A checkpoint with 128 experts loaded into a module
+  built for 64: experts 64–127 are reported.
 
 ## What it doesn't catch
 
-- **Renames to a wrong-but-existing path.** If your adapter sends
+- **Renames to a wrong-but-existing path.** If the adapter sends
   ``layers.0.mlp.experts.{j}.gate_proj.weight`` to
-  ``layers.0.mlp.shared_experts.gate_proj.weight`` (typo on the
-  destination, not the source), the audit sees a tensor at the
-  destination and considers shared experts covered. Routed experts
-  would still be missing, but the diagnosis is misleading.
-- **Tensor dtype / shape mismatches.** The audit verifies *presence*,
-  not correctness. A weight at the right path with the wrong dtype
-  loads (or fails later in ``_array_from_weight_loader``); the audit
-  is silent.
-- **Tensors that should not be in the state dict but are.** Extra
-  tensors with wrong-but-plausible paths land in ``state_dict`` and
-  pass the audit. They get dropped by ``load_state_dict(strict=False)``
-  silently — a separate failure mode, not what this audit targets.
-
-For shape / dtype correctness, rely on MAX's own ``_array_from_
-weight_loader`` checks (they raise on dtype mismatch — that's how the
-``layers.0.self_attn.o_proj.weight`` FP8/bf16 mismatch surfaced
-during the FP8 attempt). For extra tensors, the OSS gates run a
-separate strict check.
-
-## Where to wire it
-
-Right after ``nn_model.load_state_dict(...)`` in your slug's
-``model.py::_build_graph``, **before** you assign
-``self.state_dict``:
-
-```python
-nn_model.load_state_dict(
-    state_dict,
-    override_quantization_encoding=True,
-    weight_alignment=1,
-    strict=(not getattr(text_hf, "tie_word_embeddings", False)),
-)
-_audit_state_dict_coverage(
-    state_dict=state_dict,
-    num_hidden_layers=model_config.num_hidden_layers,
-    num_routed_experts=getattr(model_config, "num_experts", 0),
-    num_shared_experts=getattr(model_config, "num_shared_experts", 0),
-)
-self.state_dict = nn_model.state_dict()
-```
-
-The audit is fast (set arithmetic over ~10K names) and runs once at
-graph build. There's no production overhead.
+  ``layers.0.mlp.shared_experts.gate_proj.weight``, and the shapes match,
+  the tensor is consumed by the wrong parameter. Compare adapter output
+  against HF modeling code for any rename you wrote by hand.
+- **Tensor values.** The audit and the compile-time checks verify names,
+  shapes, and dtypes. A transposed or mis-permuted tensor with the right
+  shape loads without complaint. The comparator in
+  [`debug-model`](../../debug-model/SKILL.md) finds those.
 
 ## Reporting style
 
@@ -193,24 +125,12 @@ When the audit passes, log it explicitly so the user sees it:
 
 ```python
 logger.info(
-    "State-dict audit: all %d layers × %d routed experts (+ %d shared) "
-    "projection paths present.",
-    num_hidden_layers,
-    num_routed_experts,
-    num_shared_experts,
+    "State-dict audit: all %d checkpoint tensors consumed by the module.",
+    len(self._checkpoint_keys),
 )
 ```
 
-When it fails, the ``RuntimeError`` message is the entire artifact —
-no further work required. The first 8 missing paths usually pattern-
-match a single class of bug ("all routed experts missing" → rename
-typo; "every attention projection missing across layers 0–31" →
-wrong layer-prefix strip).
-
-## Why this isn't covered by existing scripts
-
-``run_oss_gates.py`` does a strict-load test that catches
-*extra* tensors (the dual problem). This audit catches *missing*
-tensors that strict-load can't see because we have to opt out of
-strict mode for tied embeddings. Both checks are needed; they cover
-different halves of the failure space.
+When it fails, the ``RuntimeError`` message is enough to diagnose the bug.
+The first 8 unconsumed keys usually pattern-match
+a single class of bug ("every ``q_norm``/``k_norm`` key" → missing QK-norm,
+"everything under ``model.layers``" → prefix rename).

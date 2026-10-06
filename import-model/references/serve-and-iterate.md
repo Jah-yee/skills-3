@@ -1,80 +1,66 @@
 # Serve and iterate (detail)
 
 **Path:** `<port_dir>` is the slug folder with `arch.py` and `ARCHITECTURES` in
-`__init__.py` (after scaffold, `<port_dir> = <output_dir>/<slug>/`). Pass
-**the same** `<port_dir>` to `--custom-architectures` and to
-`run_oss_gates.py --port-dir`.
+`__init__.py` (after scaffold, `<port_dir> = <output_dir>/<slug>`). Pass
+the same `<port_dir>` to `--custom-architectures` and to
+`run_oss_gates.py --port-dir`. Leave off the trailing slash. MAX reads
+`<output_dir>/<slug>/` as an empty module name and fails with
+`Failed to import custom model`.
 
 MAX loads custom archs by taking `dirname(<port_dir>)` for `sys.path` and
-importing `basename(<port_dir>)` as the module. Do **not** pass the parent of
-`<port_dir>`; you will import the wrong package (`custom-arch` instead of
-your slug) and see `AttributeError: module '…' has no attribute
+importing `basename(<port_dir>)` as the module. Don't pass the parent
+of `<port_dir>`. MAX then imports the wrong package (`custom-arch` in place
+of your slug), and you see `AttributeError: module '…' has no attribute
 'ARCHITECTURES'`.
 
 Optional colon form: ``<parent_on_sys.path>:<module_name>`` (same effect as
-passing `<port_dir>/`).
+passing `<port_dir>`).
 
 ## Prerequisites: run these before `pixi run max serve`
 
-`max serve` cold-compiles for 5–25 minutes. Before serving, run the local
-checks below. `run_oss_gates.py` covers walls and `arch.py` registration only.
+`max serve` compiles the whole model before it answers a request, so a
+mistake that the checks below catch in seconds otherwise costs a compile.
+`run_oss_gates.py` covers walls, checkpoint metadata, and the `arch.py` name
+and encoding only.
 
-### Import smoke
+### Port check
 
-Manual import test (parent on path, slug as module name; mirrors what MAX
-does):
-
-```bash
-pixi run python -c "
-import importlib, sys
-port_dir = '<absolute/path/to>/<slug>'
-sys.path.insert(0, str(__import__('pathlib').Path(port_dir).parent))
-mod = importlib.import_module('<slug>')
-arches = getattr(mod, 'ARCHITECTURES', None)
-assert arches and len(arches) >= 1, f'ARCHITECTURES missing: {arches}'
-print('arch.name:', arches[0].name)
-print('OK')
-"
-```
-
-### Graph dry-build with a stubbed state_dict
+`check_port.py` imports the port the way `max serve` does, builds the pipeline
+`max serve` would build, and stops in `load_model()` right after the port
+constructs its root module under `F.lazy()`. It then compares the module's
+parameters with the tensors your weight adapter returns for the real
+checkpoint:
 
 ```bash
-pixi run python -c "
-import sys
-from pathlib import Path
-port_dir = Path('<port_dir>')
-sys.path.insert(0, str(port_dir.parent))
-from max.graph import Graph
-from max.nn.transformer import ReturnLogits
-from transformers import AutoConfig
-from <slug>.<slug> import <YourGraphClass>
-from <slug>.model_config import <YourConfig>
-
-hf = AutoConfig.from_pretrained('<HF_MODEL_ID>', trust_remote_code=True)
-cfg = <YourConfig>(huggingface_config=hf, quantization_encoding=None, devices=[...])
-cfg.finalize(huggingface_config=hf, state_dict={}, return_logits=ReturnLogits.LAST_TOKEN)
-with Graph('smoke') as g:
-    model = <YourGraphClass>(cfg)
-print('graph built; n_params =', sum(1 for _ in model.parameters()))
-"
+pixi run python scripts/check_port.py <HF_MODEL_ID> --port-dir <port_dir>
 ```
 
-### Adapter ⇄ graph key cross-check
+For an embedding port, add `--task embeddings_generation`. The report lists:
 
-Use `list_checkpoint_keys.py` for Hub keys and diff against your graph's
-expected FQNs after the adapter runs. See
-[rename-weights.md](rename-weights.md).
+- **missing**: a parameter with no tensor. `compile()` raises `KeyError`.
+- **shape mismatch** and **dtype mismatch**: `compile()` raises
+  `ValueError`. Cast float32 or bfloat16 tensors to the parameter's dtype in
+  the adapter ([pitfalls-weights.md](pitfalls-weights.md)).
+- **unconsumed**: a tensor no parameter reads. `compile()` ignores it, which
+  hides a wrong rename.
+
+The script exits 1 when a parameter is missing or mismatched. Unconsumed
+tensors don't fail it, because a port can drop tensors on purpose (an MTP
+head, KV-cache scales). Explain each one. See
+[rename-weights.md](rename-weights.md) and
+[state-dict-audit.md](state-dict-audit.md).
 
 ### Weights-format preflight
 
 MAX loads only `.safetensors` or `.gguf` (`WeightsFormat` in
-`max/graph/weights/format.py`); no `.bin`. In `<port_dir>/arch.py`, copy
-`default_weights_format` and `weight_adapters` from your scaffold donor under
-`max/pipelines/architectures/<donor>/arch.py`; see
-[pitfalls-config.md § Import and config API traps](pitfalls-config.md#import-and-config-api-traps).
+`max/graph/weights/format.py`). It can't load `.bin`. In
+`<port_dir>/arch.py`, copy `default_weights_format` and `weight_adapters`
+from your scaffold donor under
+`max/pipelines/architectures/<donor>/arch.py`. See "Import and config API
+traps" in
+[pitfalls-config.md](pitfalls-config.md#import-and-config-api-traps).
 
-Repo file check:
+Check the repo's file list:
 
 ```bash
 pixi run python -c "
@@ -91,6 +77,9 @@ if has_bin and not has_st:
 
 ## Sanity-check the HF reference first
 
+Load the reference in float32 when it fits. A bfloat16 reference adds its own
+rounding, so a correct bfloat16 port can drift from it within a few tokens.
+
 ```bash
 pixi run python -c "
 import torch
@@ -98,7 +87,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 mid = '<HF_MODEL_ID>'
 tok = AutoTokenizer.from_pretrained(mid, trust_remote_code=True)
 m = AutoModelForCausalLM.from_pretrained(
-    mid, trust_remote_code=True, device_map='auto', dtype=torch.bfloat16,
+    mid, trust_remote_code=True, device_map='auto', dtype=torch.float32,
 ).eval()
 ids = tok('<MODEL CARD EXAMPLE PROMPT>', return_tensors='pt').input_ids.to(m.device)
 with torch.no_grad():
@@ -116,28 +105,43 @@ pixi run max serve --model-path <HF_MODEL_ID> \
 
 curl -s http://localhost:8000/v1/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "<slug>", "prompt": "<MODEL CARD EXAMPLE PROMPT>", "max_tokens": 64}' \
+  -d '{"model": "<HF_MODEL_ID>", "prompt": "<MODEL CARD EXAMPLE PROMPT>", "max_tokens": 64}' \
   | pixi run python -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['text'])"
 ```
 
-Use the model card's template for the prompt.
+Use the model card's template for the prompt. The `model` field must match
+`--model-path` (or `--served-model-name` if you set it).
 
 ## Encoder / embedding slugs
 
-Same `--custom-architectures <port_dir>`; endpoint is `/v1/embeddings` with
-`input` (not `prompt`).
+Use the same `--custom-architectures <port_dir>`, plus
+`--task embeddings_generation`. Without it, `max serve` picks text
+generation for an architecture name that more than one task registers
+(`Qwen3ForCausalLM` is both), and the model fails to load. `scaffold.py`
+prints the serve command with the flag. The endpoint is `/v1/embeddings`,
+and it takes `input`:
 
-## Three possible outcomes
+```bash
+pixi run max serve --model-path <HF_MODEL_ID> \
+  --custom-architectures <port_dir> --task embeddings_generation
+
+curl -s http://localhost:8000/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "<HF_MODEL_ID>", "input": ["first text", "second text"]}'
+```
+
+## Read the first serve result
 
 - **Crash on load** → config, imports, or weight adapter.
-- **Garbage tokens** → load [`debug-model`](../../debug-model/SKILL.md);
-  graph may still implement donor math or a latent delta.
-- **Plausible short output** → run `max_tokens=64+` before celebrating.
+- **Garbage tokens** → load [`debug-model`](../../debug-model/SKILL.md).
+  The module may still implement donor math or a latent delta.
+- **Plausible short output** → run `max_tokens=64+` before you trust it.
 
-## Iterating the fix-test loop
+## Iterate on fixes
 
-Cold compile is 5 to 25 minutes per iteration: one fix per serve, `pkill -9 max`
-between runs. When logits diverge or output is garbage, load
-[`debug-model`](../../debug-model/SKILL.md) instead of iterating scalar taps.
-Use [layer-by-layer-debugging.md](layer-by-layer-debugging.md) for the quick
+Each fix costs a serve and its compile: make one fix per serve, and stop the
+server between runs with `pkill -f "max serve"`. When logits diverge or output
+is garbage, stop iterating on scalar taps and load
+[`debug-model`](../../debug-model/SKILL.md). Use
+[layer-by-layer-debugging.md](layer-by-layer-debugging.md) for the quick
 `compare_layers.py` probe only.

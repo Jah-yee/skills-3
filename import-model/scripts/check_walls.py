@@ -65,7 +65,7 @@ def scan_config(cfg: dict) -> list[Finding]:
             Finding(
                 "block",
                 "alibi",
-                "position_embedding_type=alibi — no first-class ALiBi path in MAX 26.x",
+                "position_embedding_type=alibi: no first-class ALiBi path in MAX 26.x",
             )
         )
 
@@ -84,8 +84,8 @@ def scan_config(cfg: dict) -> list[Finding]:
             Finding(
                 "warn",
                 "ssm_or_recurrence",
-                f"SSM/recurrence signals ({', '.join(hit_ssm) or model_type}) — "
-                "verify MAX has a native arch before porting",
+                f"SSM/recurrence signals ({', '.join(hit_ssm) or model_type}). "
+                "Verify MAX has a native arch before porting",
             )
         )
 
@@ -96,8 +96,8 @@ def scan_config(cfg: dict) -> list[Finding]:
             Finding(
                 "warn",
                 "quant_only",
-                "quantization_config present and no torch_dtype/dtype — "
-                "weights may be FP8/FP4-only",
+                "quantization_config present and no torch_dtype/dtype. "
+                "Weights may be FP8/FP4-only",
             )
         )
 
@@ -108,7 +108,7 @@ def scan_config(cfg: dict) -> list[Finding]:
             Finding(
                 "warn",
                 "architectures_shape",
-                "architectures is not a list — verify config.json manually",
+                "architectures is not a list. Verify config.json manually",
             )
         )
 
@@ -118,7 +118,7 @@ def scan_config(cfg: dict) -> list[Finding]:
             Finding(
                 "warn",
                 "very_large",
-                f"~{num_params / 1e9:.0f}B params — local CPU bring-up unlikely; plan GPU tier",
+                f"~{num_params / 1e9:.0f}B params. Local CPU bring-up is unlikely, so plan a GPU tier",
             )
         )
 
@@ -164,7 +164,7 @@ def main(args: argparse.Namespace) -> int:
             print(f"{tag} [{f.code}] {f.message}")
         if code == 2:
             print(
-                "\nSee references/recognize-walls.md — do not scaffold until resolved.",
+                "\nSee references/recognize-walls.md. Don't scaffold until resolved.",
                 file=sys.stderr,
             )
 

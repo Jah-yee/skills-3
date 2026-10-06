@@ -1,12 +1,13 @@
-# Building the per-layer tensor comparator
+# Build the per-layer tensor comparator
 
-Total time ~45 minutes to build, then comparison is
-seconds.
+Building the comparator takes about 45 minutes. Each comparison after that
+takes seconds.
 
-The reference does not have to be `AutoModelForCausalLM`. Any PyTorch model
-you can attach forward hooks to works the same way: a `trust_remote_code=True`
-modeling file, or (when debugging a quantized or multi-GPU variant) your own
-already-verified MAX port's reference dumps from the original bring-up.
+The reference doesn't have to be `AutoModelForCausalLM`. Any PyTorch model
+you can attach forward hooks to works the same way. That includes a
+`trust_remote_code=True` modeling file, or (when debugging a quantized or
+multi-GPU variant) your own already-verified MAX port's reference dumps from
+the original bring-up.
 
 Set dump directories via environment variables or script arguments. Use the
 same paths in the HF dumper, MAX dumper, and comparator.
@@ -27,9 +28,11 @@ OUT_DIR = os.environ.get("HF_DUMP_DIR", "./parity_dumps/hf_layers")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 tok = AutoTokenizer.from_pretrained(REPO)
+# Load the reference in float32 when it fits: bfloat16 rounding in the
+# reference shows up as layer drift that isn't in the port.
 model = AutoModelForCausalLM.from_pretrained(
     REPO,
-    torch_dtype=torch.bfloat16,
+    dtype=torch.float32,
     device_map="auto",
     low_cpu_mem_usage=True,
 )
@@ -37,7 +40,7 @@ model.eval()
 
 backbone = model.model  # adjust for non-decoder-only architectures
 # Confirm this is the decoder stack, not a multimodal/encoder wrapper:
-# hooks on the wrong module produce dumps that compare against nothing.
+# hooks on the wrong module dump tensors with no MAX counterpart.
 print("backbone:", type(backbone).__name__)
 
 
@@ -72,64 +75,25 @@ Run time: ~2 to 3 min model load + ~1s prefill.
 
 ## Artifact 2: MAX dumper
 
-This dumper has graph edits to expose hidden states and a standalone
-runner that bypasses `max serve` to capture all graph outputs.
+This dumper has `forward()` taps to expose hidden states and a standalone
+runner that bypasses `max serve` to capture every model output.
 
-### Graph edits (in your port's model file)
+### `forward()` taps (in your port's model file)
 
-The pattern is the same regardless of how your port stacks its layers:
-behind an env flag, collect an FP32 copy of the hidden state after the
-embedding, after every decoder layer, and after the final norm, then append
-those tensors to the graph outputs.
-
-```python
-import os
-from max.dtype import DType
-from max.graph import ops, TensorValue
-
-_DUMP = os.environ.get("PORT_DUMP") == "1"
-dump_tensors: list[TensorValue] = []
-
-
-def _tap(t: TensorValue) -> None:
-    if _DUMP:
-        dump_tensors.append(ops.cast(t, DType.float32))
-
-
-h = self.embed_tokens(tokens)
-_tap(h)  # post-embed
-for layer in self.layers:  # or your port's layer-stacking helper
-    h = layer(h, ...)
-    _tap(h)  # layer_00, layer_01, ...
-h = self.norm(h)
-_tap(h)  # post-final-norm
-
-return (last_logits, *dump_tensors) if _DUMP else (last_logits,)
-```
-
-If your port stacks layers through a helper such as
-`forward_sequential_layers` (the distributed-transformer path), don't unroll
-the loop; pass the tap as its `on_layer_output` callback, and tap shard 0
-(`hs[0]`) for sharded hidden states. Warnings for that path:
-
-- **Keep subgraphs on.** Disabling subgraphs in dump mode can cause CUDA
-  errors; disabling them for serve debugging can hang compile.
-- Run the final norm across all shards (for example, `forward_sharded_layers`)
-  before tapping its output.
-
-**Critical**: cast to FP32 in the graph. `np.from_dlpack` fails on BF16;
-the graph-side cast lets the dumper use plain numpy.
-
-ModuleV3 ports tap inside `forward()` instead. Same FP32 rule, same
-dump list, but the tap appends to a plain list in the module and the
-compiled model returns the taps as extra outputs:
+Behind an env flag, collect an FP32 copy of the hidden state after the
+embedding, after every decoder layer, and after the final norm. Return those
+tensors as extra outputs of the root module's `forward()`:
 
 ```python
 import os
+
 from max.dtype import DType
 from max.experimental.tensor import Tensor
 
 _DUMP = os.environ.get("PORT_DUMP") == "1"
+
+
+# inside the root module's forward():
 dump_tensors: list[Tensor] = []
 
 
@@ -138,27 +102,38 @@ def _tap(t: Tensor) -> None:
         dump_tensors.append(t.cast(DType.float32))
 
 
-# inside forward(): after the embedding, after each layer, after the
-# final norm:
-_tap(h)
-...
-return (*last_logits, *dump_tensors) if _DUMP else (last_logits,)
+h = self.embed_tokens(tokens)
+_tap(h)  # post-embed
+for idx, layer in enumerate(self.layers):
+    h = layer(...)
+    _tap(h)  # layer_00, layer_01, ...
+h = self.norm(h)
+_tap(h)  # post-final-norm
+
+return (last_logits, *dump_tensors) if _DUMP else (last_logits,)
 ```
 
-The flag is read at trace time, so compile with `PORT_DUMP=1` set. The
-standalone runner below is lane-independent; on V3 the outputs are
-`Tensor` objects, so read each dump through `.driver_tensor` (a
-`Buffer`) before `np.from_dlpack`. The
-[`migrate-max-v2-to-v3`](../../migrate-max-v2-to-v3/SKILL.md) skill holds
-the V2/V3 concept map.
+The flag is read at trace time, so compile with `PORT_DUMP=1` set. Keep the
+list local to `forward()` so a second trace starts empty.
+
+**Cast to FP32 in `forward()`.** `np.from_dlpack` fails on BF16.
+The in-model cast lets the dumper use plain numpy.
+
+On a multi-GPU mesh, the hidden state is a distributed `Tensor`. Tap a
+replicated tensor, or gather it first (`F.allgather(t, tensor_axis=0)` for a
+sequence-sharded one), and the runner reads shard 0.
+
+If the port shares layer subgraphs (`as_subgraph`), keep subgraphs on in
+dump mode. The taps sit between layer calls and don't change the subgraph
+signature.
 
 ### Standalone dumper
 
 This runner uses internal pipeline APIs that shift between MAX releases. If
 an import or attribute below fails, grep your installed `max.pipelines`
-package for the symbol and adjust: the pattern (build a context, reserve KV
-cache, prepare token inputs, call the inner model's `execute`) is what
-matters, not the exact paths.
+package for the symbol and adjust. The steps stay the same across releases:
+build a context, allocate KV cache for it, prepare token inputs, and call the
+compiled model.
 
 ```python
 import os
@@ -168,29 +143,30 @@ from max.pipelines.lib.registry import PIPELINE_REGISTRY
 from max.pipelines.context import SamplingParams, TextContext, TokenBuffer
 # Register your architecture the same way you would for max serve.
 
-pipeline = PIPELINE_REGISTRY.retrieve(your_pipeline_config)
-pipeline_model = pipeline.pipeline_model
-inner_model = pipeline_model.model
+_tokenizer, pipeline = PIPELINE_REGISTRY.retrieve(your_pipeline_config)
+pipeline_model = pipeline._pipeline_model
+inner_model = pipeline_model.model  # the compiled ModuleV3 callable
+kv_manager = pipeline.kv_manager
 
 ctx = TextContext(
     max_length=n_tokens + 1,
-    tokens=TokenBuffer(prompt_ids),
+    tokens=TokenBuffer(np.asarray(prompt_ids, dtype=np.int64)),
     sampling_params=SamplingParams(max_new_tokens=1),
 )
 replica_batches = [[ctx]]
 
-with pipeline._kv_manager.reserve(replica_batches, num_steps=1):
-    kv_inputs = pipeline._kv_manager.runtime_inputs(
-        replica_batches, num_steps=1
-    )
-    model_inputs = pipeline_model.prepare_initial_token_inputs(
-        replica_batches=replica_batches,
-        kv_cache_inputs=kv_inputs,
-        return_n_logits=1,
-    )
-    # Call inner_model.execute directly. pipeline_model.execute strips
-    # everything but logits. inner_model.execute is read-only; don't patch it.
-    outs = inner_model.execute(*model_inputs.buffers)
+kv_manager.claim(ctx)
+kv_manager.alloc(ctx)
+kv_inputs = kv_manager.runtime_inputs(replica_batches)
+model_inputs = pipeline_model.prepare_initial_token_inputs(
+    replica_batches=replica_batches,
+    kv_cache_inputs=kv_inputs,
+    return_n_logits=1,
+)
+# Call the compiled model directly. pipeline_model.execute strips
+# everything but logits. Don't patch the compiled callable.
+outs = inner_model(*model_inputs.buffers)
+kv_manager.release(ctx)
 
 NAMES = (
     ["last_logits", "post_embed"]
@@ -200,12 +176,13 @@ NAMES = (
 out_dir = os.environ.get("MAX_DUMP_DIR", "./parity_dumps/max_layers")
 os.makedirs(out_dir, exist_ok=True)
 for name, o in zip(NAMES, outs):
-    arr = (
-        np.asarray(o.to_numpy()).copy()
-        if hasattr(o, "to_numpy")
-        else np.from_dlpack(o).copy()
-    )
+    # Outputs are Tensors. A distributed output reads shard 0.
+    shard = o.local_shards[0] if o.is_distributed else o
+    arr = shard.to_numpy().copy()
+    if name == "last_logits":
+        arr = arr[0]  # [1, vocab] to [vocab], the shape the HF dumper saves
     np.save(f"{out_dir}/{name}.npy", arr)
+np.save(f"{out_dir}/prompt_tokens.npy", np.asarray(prompt_ids))
 print("done", out_dir)
 ```
 
@@ -217,29 +194,29 @@ model). The dump itself is under one second.
 ### Quick inspection with `PrintHook`
 
 The tensor dumpers above save each layer's activations to disk for offline
-diffing. For a faster look that needs no graph edits, `max.nn.hooks.PrintHook`
+diffing. For a faster look that needs no model edits, `max.nn.hooks.PrintHook`
 prints every layer's inputs and outputs as the model runs:
 
 ```python
 from max.nn.hooks import PrintHook
 
 hook = PrintHook()
-hook.name_layers(model)  # name layers by attribute path; V2 and V3
-# build and execute the graph
+hook.name_layers(model)  # name each Module by its attribute path
+# compile and run the model
 hook.remove()
 ```
 
-`PrintHook` attaches to MAX models only (V2 `Layer` or V3 `Module`). When the
-reference is a MAX ModuleV2 implementation (common when bringing up a ModuleV3
-port), add the same hook to both, run them, and compare the printed layer
-values to find the first one that disagrees. When the reference is a
-`transformers` model, hook it with the PyTorch forward hooks from Artifact 1
-instead. For multi-device (distributed) tensors, `F.print(value, name)` from
-`max.experimental.functional` prints each shard with its device.
+`PrintHook` attaches to MAX `Module` trees. When the reference is another MAX
+implementation of the same model, add the same hook to both and run them.
+Compare the printed layer values to find the first one that disagrees. When
+the reference is a `transformers` model, hook it with the PyTorch forward
+hooks from Artifact 1. For multi-device (distributed) tensors,
+`F.print(value, name)` from `max.experimental.functional` prints each shard
+with its device.
 
-`PrintHook` prints to the console, so it suits quick triage, not repeatable
-diffing. For cosine comparison across a full run, use the saved-dump comparator
-above. For MAX's other built-in debugging options, see
+`PrintHook` prints to the console, so use it for quick triage. For cosine
+comparison across a full run, use the saved-dump comparator above. For MAX's
+other built-in debugging options, see
 [the MAX debugging tools](https://max.modular.com/develop/debugging/).
 
 ## Artifact 3: Comparator
@@ -273,7 +250,8 @@ for n in names:
         continue
     diff = np.abs(h - m)
     idx = np.unravel_index(np.argmax(diff), diff.shape)
-    spike = f"(t={idx[0]},d={idx[1]}) HF={h[idx]:+.2f} MAX={m[idx]:+.2f}"
+    pos = ",".join(str(i) for i in idx)  # (token, dim), or (vocab,) for logits
+    spike = f"({pos}) HF={h[idx]:+.2f} MAX={m[idx]:+.2f}"
     print(
         f"{n:25s} {cos(h, m):9.4f} {diff.mean():10.4f} {diff.max():10.4f}  {spike}"
     )
@@ -289,7 +267,7 @@ for n in names:
 
 **Common reading mistake**: `max_diff` is element-wise disagreement, not
 the tensor's max-abs. A large `max_diff` where HF has a spike and MAX is
-flat means HF formed an anchor MAX didn't, not "MAX exploding".
+flat means HF formed an anchor MAX didn't.
 
 ## Beyond the default comparator
 
@@ -321,36 +299,37 @@ with torch.no_grad():
     out = model(input_ids=ids, attention_mask=mask, output_hidden_states=True)
 ```
 
-**MAX:** build `TextContext` with the same token list; set
+**MAX:** build `TextContext` with the same token list, and set
 `return_n_logits=1` for last-position logits only.
 
 ## HF `hidden_states` indexing
 
-Do **not** assume `output_hidden_states[i+1]` is layer `i` output. Some
+**Don't** assume `output_hidden_states[i+1]` is layer `i` output. Some
 models store pre-layer inputs plus a final norm output, not per-layer
 outputs. Use per-layer forward hooks when tuple semantics are unclear.
 See [comparator-output-patterns.md](comparator-output-patterns.md).
 
 Use `add_special_tokens=False` when your MAX prompt has no BOS.
 
-## RoPE sanity (before blaming attention math)
+## Check RoPE before debugging attention
 
-For position-dependent divergence (t=0 perfect, t≥1 bad from layer 1):
+For position-dependent divergence (t=0 matches, t≥1 bad from layer 1):
 
 ```python
 pos = torch.arange(seq_len, device=model.device).unsqueeze(0)
 emb = model.model.rotary_emb(hidden_states, pos)
 print("inv_freq max:", model.model.rotary_emb.inv_freq.abs().max().item())
-print("cos sample:", emb[0, -1, :4].tolist())
-print("sin sample:", emb[1, -1, :4].tolist())
+cos, sin = emb
+print("cos sample:", cos[0, -1, :4].tolist())
+print("sin sample:", sin[0, -1, :4].tolist())
 ```
 
-If `inv_freq≈0` → cos≈1, sin≈0 → **NoPE at runtime**. Your MAX graph must
+If `inv_freq≈0` → cos≈1, sin≈0 → **NoPE at runtime**. Your MAX module must
 not apply plain RoPE when HF uses identity rotation at runtime.
 
 ## Stateful layers (conv, SSM): incremental decode dumps
 
-Teacher-forced **prefill-only** dumps are not enough when the model carries
+Teacher-forced **prefill-only** dumps aren't enough when the model carries
 state across decode steps (conv layers, SSM blocks, etc.). A single
 `execute()` with the full greedy prefix exercises prefill math but may not
 match the **incremental** decode path your verification uses.
@@ -364,7 +343,7 @@ match the **incremental** decode path your verification uses.
    autoregressive MAX greedy throughout).
 
 When dump mode returns logits + tap tensors + state tensors, document the
-output order in your graph. Slice state outputs by count, not by position
+output order in your `forward()`. Slice state outputs by count, not by position
 after logits alone.
 
 ## Comparator CLI extensions

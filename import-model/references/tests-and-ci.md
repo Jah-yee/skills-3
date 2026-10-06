@@ -1,43 +1,48 @@
 # Tests and CI
 
-When you add `pytest` tests for the ported model — layer tests, graph
-tests, or model smoke tests under `max/` — minimize the number of MAX
-graph compilations per test file. A file that recompiles for each
-parameter combination, or that contains many independent compiled
-graphs, will time out in CI.
+When you add `pytest` tests for the ported model (layer tests, module
+tests, or model smoke tests under `max/`), minimize the number of
+`compile()` calls per test file. A file that recompiles for each
+parameter combination, or that contains many independently compiled
+modules, can time out in CI.
 
-Two patterns prevent timeouts. Use them together.
+The patterns below prevent timeouts. Use them together.
 
 ## Pattern 1: Compile once via a module-scoped fixture
 
-Compile the graph one time in a fixture and reuse it across every test
-in the file. Combine with `@pytest.mark.parametrize` to vary inputs
-without recompiling.
+Compile the module one time in a fixture and reuse it across every test
+in the file. Use symbolic dimensions in the input types, so one compiled
+module accepts every shape, and combine with `@pytest.mark.parametrize` to
+vary inputs without recompiling.
 
 ```python
 import pytest
-from max.graph import Graph
+from max.driver import Accelerator
+from max.dtype import DType
+from max.experimental.tensor import TensorType
+
+from my_port.layers import MyMLP
 
 
 @pytest.fixture(scope="module")
-def model(session):
-    with Graph(...) as g:
-        ...
-    return session.compile(g)
+def mlp():
+    device = Accelerator()
+    layer = MyMLP(hidden_size=64, intermediate_size=256)
+    layer.to(device)
+    return layer.compile(TensorType(DType.bfloat16, ["seq", 64], device))
 
 
-@pytest.mark.parametrize("input_shape", [...])
-def test_forward(input_shape, model): ...  # exercise the already-compiled model
+@pytest.mark.parametrize("seq_len", [1, 7, 128])
+def test_forward(seq_len, mlp): ...  # exercise the already-compiled module
 ```
 
-A module-scoped fixture lives for the lifetime of the test file's
-pytest process, so every test in the file shares the same compiled
-graph.
+pytest creates a module-scoped fixture once per test file, so every test
+in the file shares the same compiled module.
 
-## Pattern 2: Parallelize different graphs with `shard_count`
+## Pattern 2: Parallelize different modules with `shard_count`
 
-When a single file must compile different graphs — different dtypes,
-kernel variants, or distribution shapes — don't split the file manually.
+When a single file must compile different modules (different dtypes,
+kernel variants, or distribution shapes), don't split the file manually.
 Use Bazel test sharding to spread the work across parallel CI workers:
 
 ```bzl
@@ -48,9 +53,9 @@ modular_py_test(
 )
 ```
 
-Bazel launches `N` parallel pytest processes; each runs roughly `1/N`
+Bazel launches `N` parallel pytest processes. Each runs roughly `1/N`
 of the tests. Module-scoped fixtures are per-process, so each shard
-compiles only the graphs its tests need, and the compiles happen in
+compiles only the modules its tests need, and the compiles happen in
 parallel.
 
 The `pytest-shard` plugin adds fine-grained markers:
@@ -63,11 +68,11 @@ The `pytest-shard` plugin adds fine-grained markers:
 
 Reach for each pattern in different situations:
 
-- Use fixtures in any test file that exercises a compiled MAX graph
-  more than once.
+- Use fixtures in any test file that exercises a compiled module more
+  than once.
 - Use sharding in any test file whose total wall time approaches the CI
-  timeout, especially when the file contains independent compiled
-  graphs that can't share a fixture.
+  timeout, especially when the file contains independently compiled
+  modules that can't share a fixture.
 
-The two patterns compose: fixtures minimize compiles where graphs are
-shareable; sharding parallelizes compiles where they aren't.
+Fixtures minimize compiles where modules are
+shareable, and sharding parallelizes compiles where they aren't.

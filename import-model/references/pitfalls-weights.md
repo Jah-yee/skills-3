@@ -1,62 +1,78 @@
 # Weight adapter pitfalls
 
-In scope: Phase 2 traps surfaced while writing `weight_adapters.py`,
-mapping HF safetensor keys to MAX FQNs, and handling BF16 tensors.
+This page covers Phase 2 traps that surface while you write
+`weight_adapters.py`, map HF safetensor keys to the root module's parameter
+names, and handle BF16 tensors. It describes these pitfalls:
 
-Covered:
-
-- Tied embeddings need shared tensor objects
-- `stacked_qkv=False` keeps HF's unfused Q/K/V key names
-- `lm_head.weight` is the canonical state-dict key — never rename to
-  `output.weight`
-- Don't trust `strict=False` weight loads
+- Weight names follow the root module's attribute paths
+- Tied embeddings keep one copy of the shared weight
+- Unconsumed checkpoint tensors load without an error
+- Dtype mismatches raise unless `auto_cast` permits them
 - `numpy.from_dlpack` does not support bfloat16
 - Embedding row-count may exceed `vocab_size`
 
-## Tied embeddings need shared tensor objects
+## Weight names follow the root module's attribute paths
 
-If `config.tie_word_embeddings=True`, `lm_head.weight` must be the *same
-tensor object* as `embed_tokens.weight`. Copying the values isn't enough
-— the weight loader must alias them. Verify in your weight adapter that
-when `tie_word_embeddings=True`, the lm_head key is set to the same
-tensor as the embedding key.
+`compile(weights=...)` looks up each parameter by its attribute path from the
+root module that `_instantiate_module()` returns. When the root stores its
+text model as `self.language_model`, every text-model weight is named
+`language_model.<...>`, and the adapter maps HF's `model.layers.` to
+`language_model.layers.` (`olmo3/weight_adapters.py`). Print the expected
+names from the lazily built module:
 
-## `stacked_qkv=False` keeps HF's unfused Q/K/V key names
+```python
+from max.experimental import functional as F
 
-`AttentionWithRope(stacked_qkv=False)` builds
-`StackedLinear(stacked=False, names=["q_proj","k_proj","v_proj"])`, which
-sets `_omit_module_attr_name=True`. The Q/K/V weights are therefore
-exposed at `self_attn.{q,k,v}_proj.weight` — exactly what HF ships. **Do
-not** rename to `qkv_proj.q/k/v.weight`; that path silently orphans the
-projections under `strict=False` and logit checks return gibberish. The
-fused `self_attn.qkv_proj.weight` name applies only to
-`stacked_qkv=True`.
+with F.lazy():
+    model = MyModel(config, kv_params)
+expected = {name for name, _ in model.parameters}
+```
 
-## `lm_head.weight` is the canonical state-dict key — never rename to `output.weight`
+HF ships `lm_head.weight` at the top level. Map it to wherever your root
+module holds the head (`language_model.lm_head.weight` in `olmo3`).
 
-`max.nn.Transformer.__init__` sets `self.lm_head = output`, so the output
-projection's weight lands at `lm_head.weight` in the loaded state dict,
-**not** `output.weight`. Some donor scaffolds incorrectly rename
-`lm_head.` → `output.` in `weight_adapters.convert_safetensor_state_dict`.
-Under `strict=False`, this silently leaves `lm_head.weight`
-zero-initialized and the model emits repeated punctuation or garbage
-with no load warning.
+## Tied embeddings keep one copy of the shared weight
 
-**Rule:** in `weight_adapters.py`, treat `lm_head.weight` (and
-`embed_tokens.weight`) as canonical names — pass through, do not
-rewrite to a donor-internal alias. State-dict audit
-(see [`state-dict-audit.md`](state-dict-audit.md)) catches this.
+When `config.tie_word_embeddings=True`, create no `lm_head` parameter and
+compute the logits from the embedding weight in `forward()`:
 
-## Don't trust `strict=False` weight loads
+```python
+if self.tie_word_embeddings:
+    logits = h @ self.embed_tokens.weight.T
+else:
+    logits = self.lm_head(h)
+```
 
-When a `state_dict` load reports "missing keys" or "unexpected keys",
-it's reporting silently-wrong behavior. Missing keys mean some MAX
-parameters stayed at their random initialization. Unexpected keys mean
-some HF tensors were dropped on the floor.
+The state dict then holds one tensor, `embed_tokens.weight`. If the
+checkpoint also ships `lm_head.weight` for a tied model, drop it in the
+adapter.
 
-Either case will pass through to runtime as garbage output with no
-error. Always make `weight_adapters.py` produce *exactly* the expected
-MAX FQNs — no missing, no extra.
+## Unconsumed checkpoint tensors load without an error
+
+`compile(weights=...)` raises `KeyError` for a parameter with no tensor and
+`ValueError` for a shape or dtype mismatch. A checkpoint tensor whose name
+matches no parameter is left out without a warning. That hides these bugs:
+
+- A rename typo sends a real tensor to a name nothing reads, while another
+  rename fills the intended parameter with a tensor of the same shape.
+- The checkpoint carries a component the module never built (QK-norm
+  weights, a shared expert, attention biases), so the port computes without
+  it.
+
+Run the unconsumed-key audit in [state-dict-audit.md](state-dict-audit.md)
+before serving.
+
+## Dtype mismatches raise unless `auto_cast` permits them
+
+A parameter's dtype comes from the module's default dtype
+(`_module_default_dtype()`, the encoding's dtype unless overridden). A
+checkpoint tensor in another dtype fails `compile()` with
+`Loaded tensor (shape=..., dtype=...) not assignable to parameter`. Cast in
+the adapter, or override `_prepare_state_dict()` in `model.py`.
+`ModuleV3PipelineModelWithKVCache.load_model()` calls `compile()` without
+`auto_cast`, so a pipeline port needs one of these casts. When you call
+`compile()` yourself, `compile(auto_cast=True)` casts between `float32` and
+`bfloat16`.
 
 ## `numpy.from_dlpack` does not support bfloat16
 
@@ -69,6 +85,7 @@ reshaping, repacking), use torch as the DLPack bridge:
 ```python
 import torch
 from max.graph import Shape
+from max.graph.weights import WeightData
 
 t = torch.from_dlpack(weight_data.data)
 t_sliced = t[:vocab_size].contiguous()
@@ -76,15 +93,12 @@ new_wd = WeightData(
     data=t_sliced,
     name=name,
     dtype=weight_data.dtype,
-    shape=Shape((vocab_size, hidden_size)),  # MUST be Shape, not tuple
+    shape=Shape((vocab_size, hidden_size)),
     quantization_encoding=weight_data.quantization_encoding,
 )
 ```
 
-The `shape` argument **must be a `max.graph.Shape`**, not a `tuple`.
-The layer-loader validator compares the WeightData shape against the
-graph's expected `[Dim, Dim, …]` and rejects raw tuples with
-`expected=[Dim(N), Dim(D)], actual=(N, D)`. Always wrap in
+`WeightData.shape` is a `max.graph.Shape`. Wrap the dimensions in
 `Shape((...))`.
 
 ## Embedding row-count may exceed `vocab_size`
@@ -93,10 +107,10 @@ Some HF models size their `nn.Embedding` larger than
 `config.vocab_size` to make room for special image/tile/audio tokens
 that the LM head doesn't predict over. Mllama ships
 `nn.Embedding(vocab_size + 8, hidden_size)` with
-`lm_head: Linear(hidden_size, vocab_size)` — embed is 128264 rows,
-lm_head is 128256. MAX sizes `embed_tokens` at `vocab_size` and fails
-to load 128264-row weights. The weight adapter must slice the first
-`vocab_size` rows of `embed_tokens.weight`; the extra rows are
-reserved special tokens that never appear in text-only generation,
-so truncation is safe for that scope. Use the torch-DLPack pattern
-above; NumPy will crash on BF16.
+`lm_head: Linear(hidden_size, vocab_size)`. The embedding has 128264 rows,
+and `lm_head` has 128256. A MAX `Embedding` sized at `vocab_size` fails the
+shape check on 128264-row weights. The weight adapter must slice the first
+`vocab_size` rows of `embed_tokens.weight`. The extra rows are reserved
+special tokens that never appear in text-only generation, so truncation is
+safe for that scope. Use the torch-DLPack pattern above, because NumPy
+crashes on BF16.

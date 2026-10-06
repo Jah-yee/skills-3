@@ -71,13 +71,14 @@ verified and measured. They hand off to each other, and each one names the state
 it expects the model to be in:
 
 - [`/import-model`](import-model/SKILL.md): Imports a new model architecture
-  into MAX from a Hugging Face model ID, scaffolding from a similar registered
-  architecture and verifying outputs match. Hands off to `/debug-model` when
+  into MAX from a Hugging Face model ID as a ModuleV3 model
+  (`max.experimental.nn`), scaffolding from a similar registered architecture
+  and verifying outputs match. Hands off to `/debug-model` when
   the server runs but the text is wrong.
 - [`/serve-model`](serve-model/SKILL.md): Takes you from no environment to a
   running OpenAI-compatible endpoint with `max serve`, choosing the flags a
-  model needs rather than guessing: `--devices`, `--quantization-encoding`,
-  `--max-length`, `--task`, and `--trust-remote-code`. Use
+  model needs: `--devices`, `--quantization-encoding`, `--max-length`,
+  `--task`, and `--trust-remote-code`. Use
   `--custom-architectures` for an architecture you ported with
   `/import-model`.
 - [`/migrate-max-v2-to-v3`](migrate-max-v2-to-v3/SKILL.md): Ports a model
@@ -88,31 +89,31 @@ it expects the model to be in:
   generates tokens but the output is wrong. Builds tensor-dump comparators and
   bisects serve versus pipeline. For crashes on load, use `/import-model`.
 - [`/benchmark-model`](benchmark-model/SKILL.md): Drives load against an
-  endpoint you started with `/serve-model` and reports throughput and latency
+  endpoint you started with `/serve-model`. Reports throughput and latency
   (TTFT, TPOT, inter-token latency), plus GPU utilization when it runs on the
   same NVIDIA host as the server. Hand off to `/profile-model` when the numbers
   show a bottleneck.
 - [`/profile-model`](profile-model/SKILL.md): Finds where inference time goes
-  and whether the GPU is saturated, working cheapest-first: a utilization
+  and whether the GPU is saturated. Works cheapest-first: a utilization
   snapshot, a kernel breakdown with `nsys` or `rocprofv3`, then an `ncu` deep
   dive on a single kernel when one dominates.
 - [`/eval-model`](eval-model/SKILL.md): Measures task accuracy on standard
   benchmarks: GSM8K, MMLU, HellaSwag, ARC, AIME, GPQA, TruthfulQA, WinoGrande,
   and BABILong. Distinguishes serving failures from wrong model answers. Ask
-  for it by name; it won't trigger on its own.
+  for it by name. It won't trigger on its own.
 
 ## Examples
 
 Once you install these skills, you can use them for many common tasks.
 Examples include:
 
-### Starting a new Mojo project
+### Start a new Mojo project
 
 ```text
 I'd like to create a new Mojo project named "nvfp4-for-metal".
 ```
 
-### Translating CUDA C++ code to Mojo
+### Translate CUDA C++ code to Mojo
 
 ```text
 A CUDA kernel is present in `../example`, please create a new Mojo project that implements that same kernel.

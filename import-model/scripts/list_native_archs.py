@@ -14,10 +14,17 @@
 
 Use before scaffolding: if the model's config.json::architectures[0] appears
 here, MAX already supports it and you can run `pixi run max serve` directly.
+Each row is ``arch name<TAB>slug``. A name that several architecture
+directories register (``Qwen3ForCausalLM`` in ``qwen3`` and
+``qwen3_embedding``) gets one row per directory.
+
+``--donors`` lists the ModuleV3 architectures that ``scaffold.py --start-from``
+accepts, one ``slug<TAB>arch name`` row each.
 
 Usage:
     pixi run python list_native_archs.py
     pixi run python list_native_archs.py --match LlamaForCausalLM
+    pixi run python list_native_archs.py --donors
 """
 
 from __future__ import annotations
@@ -27,17 +34,19 @@ import sys
 from pathlib import Path
 
 try:
+    from .donor import list_modulev3_donors
     from .max_arch_paths import list_native_arch_mapping
 except ImportError:
     # Standalone invocation: `python /path/to/list_native_archs.py ...`
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from max_arch_paths import (
-        list_native_arch_mapping,  # type: ignore[no-redef]
+    from donor import list_modulev3_donors  # type: ignore[no-redef]
+    from max_arch_paths import (  # type: ignore[no-redef]
+        list_native_arch_mapping,
     )
 
 MAX_NOT_INSTALLED_MSG = """\
 MAX is not installed in this Python environment (or no architectures could be discovered).
-Install MAX with pixi — not pip:
+Install MAX with pixi, not pip:
   https://max.modular.com/get-started
 Then rerun inside that environment, for example:
   pixi run python list_native_archs.py --match <ArchitecturesClassFromConfig>
@@ -45,28 +54,44 @@ Then rerun inside that environment, for example:
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
         "--match",
         metavar="ARCH_CLASS",
-        help="Exit 0 if this HF architectures[0] value is registered, else 1.",
+        help="Print the slugs that register this HF architectures[0] value "
+        "and exit 0, or exit 1 if none does.",
+    )
+    group.add_argument(
+        "--donors",
+        action="store_true",
+        help="List ModuleV3 donor slugs for scaffold.py --start-from.",
     )
 
 
 def main(args: argparse.Namespace) -> int:
+    if args.donors:
+        donors = list_modulev3_donors()
+        if not donors:
+            print(MAX_NOT_INSTALLED_MSG, file=sys.stderr)
+            return 2
+        for slug, arch_name in donors:
+            print(f"{slug}\t{arch_name}")
+        return 0
+
     mapping = list_native_arch_mapping()
     if not mapping:
         print(MAX_NOT_INSTALLED_MSG, file=sys.stderr)
         return 2
 
     if args.match:
-        slug = mapping.get(args.match)
-        if slug:
+        slugs = mapping.get(args.match, [])
+        for slug in slugs:
             print(f"{args.match}\t{slug}")
-            return 0
-        return 1
+        return 0 if slugs else 1
 
-    for arch_class, slug in sorted(mapping.items()):
-        print(f"{arch_class}\t{slug}")
+    for arch_class, slugs in sorted(mapping.items()):
+        for slug in slugs:
+            print(f"{arch_class}\t{slug}")
     return 0
 
 

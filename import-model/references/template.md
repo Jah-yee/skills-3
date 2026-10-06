@@ -1,7 +1,7 @@
 # Port: `<HF_MODEL_ID>`
 
 Copy this file when you start a bring-up. Fill it in as you work through the
-phases in [SKILL.md](../SKILL.md). Prefer data from Hub `config.json` and
+phases in `SKILL.md`. Prefer data from Hub `config.json` and
 `inspect_hf.py` over guesses.
 
 **HF model ID:** `<org/model-name>`
@@ -35,7 +35,7 @@ pixi run python scripts/check_walls.py <HF_MODEL_ID>
 If registered, stop here:
 
 ```bash
-pixi run max serve --model <HF_MODEL_ID>
+pixi run max serve --model-path <HF_MODEL_ID>
 ```
 
 ### Model card
@@ -50,7 +50,7 @@ models"):
 **Paper / blog:**
 
 **Blockers?** (custom CUDA only, FP8-only weights, ALiBi, SSM, etc.)
-→ see [recognize-walls.md](recognize-walls.md) if yes.
+→ see `references/recognize-walls.md` if yes.
 
 ### `config.json` → MAX API
 
@@ -69,14 +69,14 @@ row per key in the Hub file:
 |----------------|--------------|-------|
 |                |              |       |
 
-**Deltas** (keys that need custom nn-layer code, not just config):
+**Deltas** (keys that need custom nn-layer code beyond config):
 
 1.
 2.
 
 ### Delta list (HF vs donor MAX arch)
 
-**Chosen `--start-from` slug:** `` `<llama3|qwen3|…>` ``
+**Chosen `--start-from` slug:** `` `<llama3_modulev3|olmo3|…>` ``
 **Why this donor** (attention shape, MLP, MoE, norm order, RoPE):
 
 | Component          | HF class / behavior | MAX donor | Change needed |
@@ -97,14 +97,14 @@ mod = importlib.import_module(
 print(mod.__file__)
 ```
 
-**Difference count:** ___ (target ≤ 3 structural deltas; otherwise pick a
+**Difference count:** ___ (target ≤ 3 structural deltas, or pick a
 different donor)
 
 ---
 
 ## Phase 2: Implement
 
-### Scaffold (files only, not the port)
+### Scaffold (skeleton only, not the port)
 
 ```bash
 pixi run python scripts/scaffold.py <HF_MODEL_ID> \
@@ -112,22 +112,23 @@ pixi run python scripts/scaffold.py <HF_MODEL_ID> \
   --output-dir <output_dir>
 ```
 
-**Port directory (`<port_dir>`):** `` `<output_dir>/<slug>/` ``. Pass to
-`--custom-architectures` and `run_oss_gates.py --port-dir` (not `<output_dir>/`)
+**Port directory (`<port_dir>`):** `` `<output_dir>/<slug>` `` (no trailing
+slash). Pass to `--custom-architectures` and `run_oss_gates.py --port-dir` (not
+`<output_dir>/`).
 
-| File                 | Copied | Notes                                     |
-|----------------------|--------|-------------------------------------------|
-| `arch.py`            | yes    | Donor shell: verify `name=`               |
-| `model_config.py`    | yes    | Donor config: rewire                      |
-| `<slug>.py`          | yes    | **Donor graph: wrong until implemented**  |
-| `weight_adapters.py` | yes    | Donor renames: rewrite                    |
-| `model.py`           | yes    | Edit only if HF wrapper differs           |
+| File                 | Written | Notes                                                                  |
+|----------------------|---------|------------------------------------------------------------------------|
+| `arch.py`            | yes     | Registration shell: verify `name=`                                     |
+| `model_config.py`    | yes     | Donor config subclass: rewire                                          |
+| `<slug>.py`          | yes     | **Donor module: wrong until implemented**                              |
+| `weight_adapters.py` | yes     | Delegates to donor renames: rewrite                                    |
+| `model.py`           | yes     | `_instantiate_module()` builds your module. Edit if HF wrapper differs |
 
-**Do not serve yet.**
+Don't serve yet: `<slug>.py` still runs the donor module.
 
-### Implement the graph
+### Implement the module
 
-See [implement-graph.md](implement-graph.md). Every delta row must have
+See `references/implement-graph.md`. Every delta row must have
 a code change before serving.
 
 | Component                               | Implemented | HF `forward` line ref |
@@ -141,15 +142,21 @@ a code change before serving.
 | `arch.py` (`name=`, encoding)           |             |                       |
 
 **Implementation complete?** all boxes checked per
-[implement-graph.md](implement-graph.md#completion-criteria-required-before-serving)
+`references/implement-graph.md#completion-criteria-required-before-serving`
 
 ```bash
-pixi run python scripts/run_oss_gates.py <HF_MODEL_ID> --port-dir <port_dir>/
+pixi run python scripts/run_oss_gates.py <HF_MODEL_ID> --port-dir <port_dir>
 ```
 
 ### Guard: smoke gate
 
-All checks from [serve-and-iterate.md](serve-and-iterate.md) PASS.
+```bash
+pixi run python scripts/check_port.py <HF_MODEL_ID> --port-dir <port_dir>
+```
+
+No missing or mismatched parameters, and each unconsumed tensor explained.
+Weights-format preflight from `references/serve-and-iterate.md`
+passes.
 
 ---
 
@@ -165,30 +172,31 @@ pixi run max serve --model-path <HF_MODEL_ID> \
   --quantization-encoding <encoding from arch.py>
 ```
 
-**Prompt:** `The capital of France is`
+**Prompt:** the model card's prompt, through `/v1/chat/completions` for an
+instruction-tuned model
 
-| Outcome                             | yes / no | Notes |
-|-------------------------------------|----------|-------|
-| Server loads without crash          |          |       |
-| Output is non-garbage at 16+ tokens |          |       |
+| Outcome                                  | yes / no | Notes |
+|------------------------------------------|----------|-------|
+| Server loads without crash               |          |       |
+| Output stays coherent at `max_tokens=64` |          |       |
 
-If garbage → load [`debug-model`](../../debug-model/SKILL.md)
-(re-check deltas; block wiring often missed).
+If garbage → load `debug-model` (`../debug-model/SKILL.md`)
+(re-check deltas, since block wiring is often missed).
 
 ### Logit / layer debug
 
 **Quick probe** (then hand off to `debug-model` if diverged):
 
-**Symptom** (from [divergences.md](divergences.md)):
+**Symptom** (from `references/divergences.md`):
 
 ```bash
 pixi run python scripts/compare_layers.py <HF_MODEL_ID> \
-  --slug <slug> --port 8000 \
+  --port 8000 \
   --prompt "The capital of France is"
 
 # Or full gate after serve:
 pixi run python scripts/run_oss_gates.py <HF_MODEL_ID> \
-  --port-dir <port_dir>/ --phase verify --slug <slug> --port 8000
+  --port-dir <port_dir> --phase verify --port 8000
 ```
 
 | Run | top-1 logprob rel_diff | Verdict | Fix applied |
@@ -198,28 +206,30 @@ pixi run python scripts/run_oss_gates.py <HF_MODEL_ID> \
 
 **Root cause (when found):**
 
-**Per-layer tensor dumps** (from `debug-model`; sub-taps only after lead
-localizes):
+**Per-layer tensor dumps** (from `debug-model`, with sub-taps only after the
+lead localizes):
 
 ### Greedy text match
 
-**Prompt:** `The capital of France is`
+**Prompt:** the coherence prompt above
 **max_tokens:** 64
-**dtype:** `` `<encoding the model supports, usually bfloat16>` ``
+**MAX encoding:** `` `<encoding the model supports, usually bfloat16>` ``
+**HF reference dtype:** float32 when it fits
 
 | Side | Output |
 |------|--------|
 | MAX  |        |
 | HF   |        |
 
-**Match?** yes / no (first-token mismatch after divergence-hunt pass → tokenizer
-/ dtype / sampling)
+**Match?** yes / no (at the first differing token, HF's top two logprobs
+within 0.1 nats is a tie; a clear HF winner there points at tokenizer,
+dtype, or sampling)
 
 ---
 
 ## Done
 
-- [ ] Phase 2: graph implements HF (not donor shim)
+- [ ] Phase 2: module implements HF (not donor shim)
 - [ ] Phase 3: logits aligned at test prompt(s)
 - [ ] Phase 3: greedy generation matches HF on short prompt
 - [ ] Lessons captured (pitfall, divergences entry, or skill patch if reusable)

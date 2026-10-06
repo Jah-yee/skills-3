@@ -1,39 +1,50 @@
-# Graph build pitfalls
+# Module build pitfalls
 
-In scope: Phase 2 traps surfaced while writing `model.py` and assembling
-the MAX graph — `ops.*` calls, RoPE wiring, residual placement, and
-subgraph grouping.
-
-Covered:
+This page covers Phase 2 traps that surface while you write `<slug>.py` and
+the ModuleV3 `forward()` path: `F.*` calls, constants, RoPE wiring, residual
+placement, and subgraph sharing. It describes these pitfalls:
 
 - Scaffold is not a port
-- `ops.constant` requires `device=`
+- `F.constant` defaults to the accelerator and bfloat16
 - Partial-rotary padding is interleaved
-- `ops.sum` keeps the reduced dim
+- `F.sum` keeps the reduced dim
 - Stack-vs-block residual in recurrent / shared-weight architectures
-- Subgraph cache assumes uniform layer shape
+- A shared subgraph assumes uniform layer signatures
 
 ## Scaffold is not a port
 
-`scaffold.py` copies a donor (`llama3`, `qwen3`, …). Until you implement
-the graph, `<slug>.py` runs the **donor's** attention, block wiring, and MLP —
-not your model's. Serving that graph and running logit verification will
-fail; that is expected, not a tolerance or script bug. Complete
+`scaffold.py` subclasses a donor (`llama3_modulev3`, `olmo3`, …). Until you
+implement the module, `<slug>.py` runs the **donor's** attention, block
+wiring, and MLP, not your model's. Serving it and running logit verification
+will fail. That's expected, not a tolerance or script bug. Complete
 [implement-graph.md](implement-graph.md) before any verification activity.
 
-## `ops.constant` requires `device=`
+## `F.constant` defaults to the accelerator and bfloat16
 
-The MAX graph has no implicit "current device." Every `ops.constant`
-inside a `Graph` context must specify `device=`. Without it, you'll
-either get a compile error or — worse — silent wrong values.
+`F.constant(value, dtype=None, device=None)` places the constant on an
+accelerator when one is present, and a Python scalar with no `dtype` becomes
+`bfloat16` there. An epsilon or scale created that way loses precision, and a
+constant that feeds a CPU-side input (a KV-cache layer index) lands on the
+wrong device. Pass both arguments:
 
 ```python
-# Wrong
-scale = ops.constant(1.0 / math.sqrt(d), DType.float32)
+from max.driver import CPU
+from max.dtype import DType
+from max.experimental import functional as F
+from max.experimental.tensor import Tensor
+
+x = Tensor.ones([2, 4], dtype=DType.float32)
+
+# Wrong: bfloat16 on the GPU
+eps = F.constant(1e-6)
 
 # Right
-scale = ops.constant(1.0 / math.sqrt(d), DType.float32, device=x.device)
+eps = F.constant(1e-6, DType.float32, device=x.device)
+layer_idx = F.constant(0, DType.uint32, device=CPU())
 ```
+
+On a mesh, pass the mesh (`device=x.mesh`) so the constant is replicated on
+every device.
 
 ## Partial-rotary padding is interleaved
 
@@ -44,17 +55,18 @@ pad the unrotated section with interleaved identity pairs
 padding produces position-dependent errors that grow with sequence
 length.
 
-## `ops.sum` keeps the reduced dim
+## `F.sum` keeps the reduced dim
 
-In MAX, `ops.sum([N, H, D], axis=-1)` returns `[N, H, 1]`, not `[N, H]`
-like PyTorch. Squeeze after if you need rank-2.
+In MAX, `F.sum(x, axis=-1)` on a `[N, H, D]` tensor returns `[N, H, 1]`,
+where PyTorch returns `[N, H]`. `Tensor.sum()` and `F.mean()` behave the same
+way. Squeeze after if you need rank-2.
 
 ## Stack-vs-block residual in recurrent / shared-weight architectures
 
-Models that run the same transformer stack multiple times per forward
-(HRM-style loops, shared-weight stacks, some encoder-decoders) mix an
-injection state into the stack **once before the first block**, not at
-every block inside the loop.
+Some models run the same transformer stack multiple times per forward
+(HRM-style loops, shared-weight stacks, some encoder-decoders). These models
+mix an injection state into the stack **once before the first block**, not
+at every block inside the loop.
 
 HF pattern (correct):
 
@@ -75,26 +87,27 @@ for cycle in range(num_cycles):
 ```
 
 Symptom: MAX hidden-state norms grow super-linearly with depth while HF grows
-linearly; greedy text diverges from token 1–2 even when weights load cleanly.
+linearly. Greedy text diverges from token 1–2 even when weights load cleanly.
 Fix: move `z = z + injection` outside the inner layer loop (once per stack
 invocation). See also
 [implement-graph.md](implement-graph.md#recurrent--shared-weight-stacks-mix-the-injection-in-once).
 
-## Subgraph cache assumes uniform layer shape
+## A shared subgraph assumes uniform layer signatures
 
-`Transformer.subgraph_layer_groups` (the optimization that compiles one
-subgraph per group of identical layers and reuses it via ``ops.call``)
-treats the FIRST layer's input types as the subgraph signature, then
-expects every other layer in the group to call with identical operand
-types. Symptom of a violation:
+`as_subgraph(layer, name=...)` from `max.experimental.nn` traces one subgraph
+per name and input signature, and calls it from every layer that uses that
+name, so the compiler processes a repeated block once. Each call reads its own
+weights by name. The body comes from the **first** call, including that
+layer's weight shapes and any Python values baked into the trace. A later call
+with different input types gets a separate subgraph. A later layer whose
+weights differ from the first layer's breaks the shared body:
 
-```text
-Subgraph transformer_block_0 has wrong type for argument 29
-(function type: '!mo.tensor<[2048, 64], f32, gpu:0>',
- operand type: '!mo.tensor<[2048, 128], f32, gpu:0>')
-```
+- Different weight names make `compile()` raise `ValueError` with
+  `unable to look up weight by name: layers.1.<...>`.
+- Different weight shapes, or a different per-layer Python value, compile and
+  run without an error, and the layer computes wrong values.
 
-Per-layer-variable architectures violate this:
+Per-layer-variable architectures hit this when every layer shares one name:
 
 - Per-layer variable head count (e.g.
   ``num_attention_heads_per_layer = [48, 64, 48, 64, ...]``)
@@ -102,22 +115,15 @@ Per-layer-variable architectures violate this:
   (partial-rotary 0.5 vs full-rotary 1.0)
 - Mixed dense/sparse MLP per layer (dense layer 0 + sparse rest)
 
-The donor likely does ``self.subgraph_layer_groups = [list(range(num_layers))]``
-which is wrong for these models. Replace with signature-keyed grouping:
+Key the subgraph name on the layer's signature:
 
 ```python
-if config.use_subgraphs:
-    heads_per = config.num_attention_heads_per_layer or [num_heads] * N
-    layer_types = config.layer_types or ["full_attention"] * N
-    mlp_types = config.mlp_layer_types or ["sparse"] * N
-    groups: dict[tuple, list[int]] = {}
-    for i in range(N):
-        key = (heads_per[i], layer_types[i], mlp_types[i])
-        groups.setdefault(key, []).append(i)
-    self.subgraph_layer_groups = list(groups.values())
-else:
-    self.subgraph_layer_groups = []
+for i, layer in enumerate(self.layers):
+    kind = f"{heads_per[i]}_{layer_types[i]}_{mlp_types[i]}"
+    h = as_subgraph(layer, name=kind)(h, ...)
 ```
 
-Any model with ``num_attention_heads_per_layer`` or layer-type-keyed RoPE
-needs this pattern.
+`nemotron_h_modulev3/nemotron_h.py` names its subgraphs by layer kind the
+same way. A layer that bakes a per-layer value into the trace (such as a
+KV-cache layer index created with `F.constant`) can't share a subgraph with
+other layers. Call that layer directly.

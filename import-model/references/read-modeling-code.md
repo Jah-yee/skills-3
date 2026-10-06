@@ -1,8 +1,8 @@
 # Reading Hugging Face modeling code
 
-The HF `modeling_<type>.py` file is the ground truth for what your MAX
-implementation must compute. You read it while building the delta list,
-while implementing the graph, and again during the divergence hunt.
+The HF `modeling_<type>.py` file defines what your MAX implementation must
+compute. You read it while building the delta list,
+while implementing the module, and again during the divergence hunt.
 
 ## Locating the file
 
@@ -42,7 +42,7 @@ from.
 Common findings:
 
 - **Extra norms**: `self.q_norm = nn.RMSNorm(...)`, `self.k_norm = ...`
-  indicates QK-norm. Two extra norms inside attention; their dim is either
+  indicates QK-norm. Two extra norms sit inside attention. Their dim is either
   `head_dim` (Olmo2-style, per-head) or `hidden_size` (full Q/K).
 - **Extra projections**: `self.q_a_proj`, `self.q_b_proj`,
   `self.kv_a_proj_with_mqa`, `self.kv_b_proj` is MLA. Two-stage Q
@@ -59,14 +59,17 @@ This is where most architectures diverge. Read line by line:
 1. **Q/K/V computation**: are they separate (`self.q_proj(x)`, ...) or
    fused (`self.qkv_proj(x).chunk(3)`)? The weight adapter needs to match.
 2. **Shape reshaping**: `view(bsz, q_len, num_heads, head_dim)` is
-   standard. If you see `view(bsz, q_len, num_heads, 2, head_dim // 2)`,
-   that's interleaved RoPE.
+   standard. A `view(bsz, q_len, num_heads, 2, head_dim // 2)` reorders
+   channels for RoPE.
 3. **QK norm**: `q = self.q_norm(q)` before the dot product. Check the
    *dim* the norm acts on (head_dim is per-head, hidden_size is full).
-4. **RoPE application**: `apply_rotary_pos_emb(q, k, cos, sin)`. Look
-   at the rotary embedding class: does it use `rotate_half` (split-half)
-   or some variant? Is RoPE applied to only part of the head
-   (`q[..., :rope_dim]` vs. full `q`)?
+4. **RoPE application**: `apply_rotary_pos_emb(q, k, cos, sin)`. Read the body
+   of `rotate_half`, not its name: `x[..., : d // 2]` and `x[..., d // 2 :]`
+   rotate split halves (Llama), while `x[..., 0::2]` and `x[..., 1::2]` rotate
+   adjacent pairs (ERNIE 4.5, GPT-J), usually with `repeat_interleave` on `cos`
+   and `sin`. Is RoPE applied to only part of the head (`q[..., :rope_dim]` vs.
+   full `q`)? See
+   [divergences.md](divergences.md#3-rope-style-mismatch-split-half-vs-interleaved).
 5. **GQA repeat**: for `num_key_value_heads < num_attention_heads`,
    K and V get repeated. `repeat_kv(key_states, self.num_key_value_groups)`.
 6. **Mask**: sliding window vs. causal vs. sink-token. Check whether the
@@ -90,14 +93,14 @@ Most MLPs take one of the shapes below:
   per-expert SwiGLU → weighted sum. May include a "shared expert" applied
   to every token in addition to the routed experts.
 
-Things that bite:
+Common traps:
 
 - Activation name. `gelu_new` and `gelu_tanh` and plain `gelu` are *not*
   the same function. Check `ACT2FN` in `transformers/activations.py`.
 - Bias. Most modern models have `mlp_bias=False`, but GPT-NeoX, OPT, and
   some embedders have biases.
 - Up/gate fusion. Some implementations fuse `gate_proj` and `up_proj` into
-  a single `gate_up_proj` with `chunk(2)`; the weight adapter must match.
+  a single `gate_up_proj` with `chunk(2)`. The weight adapter must match.
 
 ## What to look for in the block `forward`
 
@@ -126,8 +129,8 @@ connections. Common patterns:
   out = h + post_norm2(mlp(post_attention_layernorm(h)))
   ```
 
-If your model is anything other than the first pattern, the stock MAX
-`TransformerBlock` will not match; see "Choosing an edit strategy" below.
+If your model is anything other than the first pattern, a Llama-style
+donor block won't match. See "Choosing an edit strategy" below.
 
 ## What to look for in the final head
 
@@ -141,7 +144,7 @@ In the causal-LM `forward`, find the line that produces logits. Grep for
 `lm_head(` and read the expression passed in:
 
 ```bash
-pixi run rg -n 'lm_head\(' modeling_<type>.py
+grep -n 'lm_head(' modeling_<type>.py
 ```
 
 Flag anything that is not a bare `hidden_states` (or `outputs[0]`):
@@ -149,17 +152,17 @@ Flag anything that is not a bare `hidden_states` (or `outputs[0]`):
 - **Width divisor**: `self.lm_head(h / (hidden_size / dim_model_base))`,
   `h / self.scale_width`, or `h * (dim_model_base / hidden_size)`. Common on
   MiniCPM-family and some Cohere-style configs. `dim_model_base` is often
-  smaller than `hidden_size`; missing the divisor makes logits wrong with no
+  smaller than `hidden_size`. Missing the divisor makes logits wrong with no
   load error.
 - **MuP `logits_scaling`**: multiply or divide logits *after* `lm_head` (see
-  [divergences.md §13](divergences.md#13-mup-scalars)). Do not confuse with a
-  pre-head width divisor; check order in HF.
+  [divergences.md §13](divergences.md#13-mup-scalars)). Don't confuse it with
+  a pre-head width divisor. Check the order in HF.
 - **Final logit softcap**: Gemma 2: `softcap * tanh(logits / softcap)` after
   the linear.
 
-Record the exact formula in your delta list (scalar name, config keys, and
+Record the formula in your delta list (scalar name, config keys, and
 whether scaling happens before or after `lm_head`). In MAX, mirror that
-order in `<slug>.py`, usually `ops.mul` / `ops.div` on the last hidden
+order in `<slug>.py`, usually a `*` or `/` on the last hidden
 state before the output `Linear`, not only a post-hoc logits tweak.
 
 ### Other head variants
@@ -169,7 +172,7 @@ state before the output `Linear`, not only a post-hoc logits tweak.
   matrix.
 - **Multi-step head**: some models apply additional layers between the
   final block and the LM head (`LayerNorm → Linear → activation →
-  Linear(vocab)`). The MAX template likely ends with a single Linear; you
+  Linear(vocab)`). The MAX template likely ends with a single Linear, so you
   need to add the extra layers.
 
 ## Choosing an edit strategy
@@ -178,27 +181,24 @@ Given your delta list, pick an approach:
 
 | What differs                                             | Strategy                                         |
 |----------------------------------------------------------|--------------------------------------------------|
-| Only weight names; computation identical                 | Edit `weight_adapters.py` only                   |
+| Only weight names, computation identical                 | Edit `weight_adapters.py` only                   |
 | One sublayer differs (custom MLP, QK-norm)               | Subclass the layer, override one method          |
-| One attention variant (sliding window, MLA, softcap)     | Subclass `Attention`, override `__call__`        |
-| Block layout differs (post-norm, peri-LN)                | Subclass `TransformerBlock`, override `__call__` |
+| One attention variant (sliding window, MLA, softcap)     | Subclass the donor attention, override `forward` |
+| Block layout differs (post-norm, peri-LN)                | Subclass the donor block, override `forward`     |
 | Multi-step head                                          | Subclass the top-level model, override the head  |
-| Attention is fundamentally new (recurrence, state-space) | Write from scratch with ModuleV3 primitives      |
+| Attention is fundamentally new (recurrence, state-space) | Write a new `Module` from `max.experimental.nn`  |
 | MoE routing differs from existing MAX MoE archs          | Write from scratch                               |
 
-Prefer subclassing. Every layer you write from scratch is a layer you can
-get wrong; every layer you inherit is a layer that already passed someone
-else's parity check.
+Prefer subclassing. An inherited layer has already passed the donor's
+parity check, and a layer written from scratch hasn't.
 
 ## Inheritance traps
 
 HF modeling code often inherits across model families in non-obvious ways.
-Before you conclude "this is just Llama with renamed fields":
+Before you conclude that the model is Llama with renamed fields:
 
 1. Read the *full* MRO of the class. `print(MyClass.__mro__)`.
-2. Check whether any parent overrides `forward` or `__init__` in ways your
-   class inherits silently.
+2. Check whether any parent overrides `forward` or `__init__`, which your
+   class then inherits.
 3. Look for `if config.use_xxx:` branches in parent classes that your model
    activates via config.
-
-The class hierarchy is where the easter eggs live.

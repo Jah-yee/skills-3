@@ -16,6 +16,6 @@ This package exposes the individual scripts (``inspect_hf``, ``scaffold``,
 ``check_walls``, ``list_checkpoint_keys``, ``list_native_archs``,
 ``run_oss_gates``, ``compare_layers``) and a unified CLI dispatcher in
 ``import_model``. Each script still works as a standalone entry point
-(``pixi run python /path/to/scaffold.py ...``); the package layout is
+(``pixi run python /path/to/scaffold.py ...``). The package layout is
 additive.
 """

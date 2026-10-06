@@ -29,9 +29,10 @@ nn_model.compile(*input_types, weights=state_dict)
 ```
 
 Input types are required in both APIs, and compilation freezes the graph
-(`session.load()` or `compile()`). Weight keys are strict in both:
-mismatched keys in the state dict are an error, in `load_state_dict()`
-and in `compile(weights=...)` alike.
+(`session.load()` or `compile()`). `compile(weights=...)` raises for a
+parameter with no state-dict entry (`KeyError`) or with a mismatched shape
+or dtype (`ValueError`). A state-dict entry that matches no parameter is
+left out without an error.
 
 The differences:
 
@@ -39,8 +40,8 @@ The differences:
   weight tensors symbolically. The checkpoint weights passed to
   `compile()` replace them, so allocating real tensors up front would
   waste memory.
-- `compile(weights=...)` is also the load step: pass the state dict
-  there instead of calling `load_state_dict()` before graph building.
+- `compile(weights=...)` is also the load step, so pass the state dict
+  there. Drop the V2 `load_state_dict()` call before graph building.
 - A dtype mismatch between a parameter and its loaded tensor raises by
   default. Pass `auto_cast=True` (or `auto_cast_weights_from_env()` from
   `max.pipelines.weights.weight_loading`) to allow safe dtype casts.
@@ -66,6 +67,11 @@ class Linear(Module, Shardable):
 ### Linear (ModuleV3)
 
 ```python
+from max.experimental import random
+from max.experimental.nn import Module
+from max.experimental.tensor import Tensor
+
+
 class Linear(Module):
     def __init__(self, in_dim, out_dim):
         self.weight = random.normal([out_dim, in_dim])
@@ -79,7 +85,8 @@ class Linear(Module):
   `.to()` on the tensor directly. `Module.to()` rejects a multi-device
   mesh; see the distributed section below.
 - There is no `Weight` class. Weights are `Tensor` objects, created
-  with `Tensor.zeros()`, `max.experimental.random.*`, and friends.
+  with `Tensor.zeros()`, `max.experimental.random.*`, and similar
+  factories.
 - `__call__()` becomes `forward()`.
 - Constructor args are keyword-only where V2 accepted positions:
   `Embedding(vocab_size, dim=...)` takes its dimension by keyword, and
@@ -147,10 +154,10 @@ with F.lazy(), default_dtype(dtype), default_device(llm.mesh):
   sharding solver redistributes at dispatch time, so there is no
   per-device module list to iterate.
 
-## Rule of thumb
+## Eager and compiled use
 
 A ModuleV3 module should work both eagerly and compiled. It takes
-`Tensor` instead of `TensorValue`, and its ops come from
+`Tensor` where V2 took `TensorValue`, and its ops come from
 `max.experimental.functional` (`F.gather()`, not `ops.gather()`).
 
 ## Imports
@@ -182,8 +189,8 @@ The KV cache splits across packages: `PagedCacheValues` comes from
 `max.experimental.nn.common_layers.kv_cache`, while `KVCacheParams`,
 `KVCacheParamInterface`, and `MultiKVCacheParams` stay in
 `max.nn.kv_cache`. `max.nn` also exports a `PagedCacheValues` of its
-own, an alias for the V2 input type without `from_upstream()`; the
-`max.experimental` path carries the V3 type.
+own, the same name resolving to the V2 input type, which lacks
+`from_upstream()`. The `max.experimental` path carries the V3 type.
 
 ### Double-check these imports
 
@@ -193,7 +200,7 @@ from max.nn.layer import LayerList, Module
 from max.nn.embedding import VocabParallelEmbedding
 ```
 
-Anything importing layers from `max.nn` instead of `max.experimental.nn`
+Any file that imports layers from `max.nn` (not `max.experimental.nn`)
 needs a second look.
 
 ### Some max.nn imports are fine
@@ -209,9 +216,25 @@ from max.nn.kv_cache import KVCacheInputs, KVCacheParamInterface
 
 ## When there is no Tensor equivalent
 
-- A missing op goes into
+- Any graph op or kernel: wrap it with `F.functional()`. It turns a
+  function over `TensorValue` into one over `Tensor`, and it runs the
+  function on each device's shard for a distributed input:
+
+  ```python
+  from max.experimental import functional as F
+  from max.graph import TensorValue, ops
+
+
+  def _last_tokens(h: TensorValue, offsets: TensorValue) -> TensorValue:
+      return ops.gather(h, offsets[1:] - 1, axis=0)
+
+
+  last_tokens = F.functional(_last_tokens)
+  ```
+
+- A missing op used across architectures goes into
   `max/experimental/nn/common_layers/functional_kernels.py` in the
-  installed `max` package; in the MAX source repository the file lives
+  installed `max` package. In the MAX source repository, the file lives
   at `max/python/max/experimental/nn/common_layers/functional_kernels.py`.
 - A missing layer gets a ModuleV3 version, added to `common_layers` or
   to the architecture's own `<arch>/layers/<layer_name>.py`.
@@ -220,6 +243,9 @@ from max.nn.kv_cache import KVCacheInputs, KVCacheParamInterface
   wrapper. Wrapping `split_batch_replicated()`:
 
   ```python
+  from max.experimental.sharding import DeviceMapping
+  from max.experimental.tensor import Tensor
+  from max.graph import DeviceRef, TensorValue
   from max.nn.data_parallelism import split_batch_replicated
 
 

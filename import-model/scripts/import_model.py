@@ -20,19 +20,20 @@ Subcommands:
 
 - ``inspect <HF_ID> [--output ...]``                   -> inspect_hf.py
 - ``scaffold <HF_ID> --start-from <slug> --output-dir ...``  -> scaffold.py
-- ``list-archs [--match <Class>]``                     -> list_native_archs.py
+- ``list-archs [--match <Class> | --donors]``          -> list_native_archs.py
 - ``check-walls <HF_ID> [--json]``                     -> check_walls.py
 - ``list-keys <HF_ID> [--summary | --prefix ... ...]`` -> list_checkpoint_keys.py
+- ``check-port <HF_ID> --port-dir ... [--task ...]``    -> check_port.py
 - ``gates <HF_ID> --port-dir ... [--phase ...]``       -> run_oss_gates.py
-- ``compare <HF_ID> --slug ... --port ...``            -> compare_layers.py
+- ``compare <HF_ID> --port ...``                       -> compare_layers.py
 
 Each subcommand also remains usable as a standalone script:
 
-    pixi run python /path/to/scripts/scaffold.py <HF_ID> --start-from llama3 ...
+    pixi run python /path/to/scripts/scaffold.py <HF_ID> --start-from olmo3 ...
 
 is equivalent to:
 
-    pixi run python /path/to/scripts/import_model.py scaffold <HF_ID> --start-from llama3 ...
+    pixi run python /path/to/scripts/import_model.py scaffold <HF_ID> --start-from olmo3 ...
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from pathlib import Path
 
 try:
     from . import (
+        check_port,
         check_walls,
         compare_layers,
         inspect_hf,
@@ -53,6 +55,7 @@ try:
     )
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import check_port  # type: ignore[no-redef]
     import check_walls  # type: ignore[no-redef]
     import compare_layers  # type: ignore[no-redef]
     import inspect_hf  # type: ignore[no-redef]
@@ -71,12 +74,12 @@ _SUBCOMMANDS = [
     (
         "scaffold",
         scaffold,
-        "Generate a custom-arch port skeleton from a MAX donor.",
+        "Generate a custom-arch port skeleton from a ModuleV3 donor.",
     ),
     (
         "list-archs",
         list_native_archs,
-        "List HF architecture classes registered in MAX.",
+        "List HF architecture classes in MAX, or ModuleV3 donors.",
     ),
     (
         "check-walls",
@@ -87,6 +90,11 @@ _SUBCOMMANDS = [
         "list-keys",
         list_checkpoint_keys,
         "List Hub safetensors keys, shapes, dtypes.",
+    ),
+    (
+        "check-port",
+        check_port,
+        "Check a port's parameters against its checkpoint, without compiling.",
     ),
     (
         "gates",

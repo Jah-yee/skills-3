@@ -1,26 +1,12 @@
 # Multi-GPU distribution-shape patterns
 
-New multi-GPU ports are ModuleV3: a `DeviceMesh`, `col_parallel()` /
-`row_parallel()` placements on the weights, and the model built inside
-`default_device(mesh)`, with no per-device module lists. Read
-`kimik2_5_modulev3` (TP + EP) and the distributed section of
-[v2-v3-basics.md](../../migrate-max-v2-to-v3/references/v2-v3-basics.md).
-The decision rule below (how many GPUs) applies to both APIs; the donor
-table and the base-class material after it describe existing V2
-architectures.
-
 Most decoder ports past ~30B BF16 are multi-GPU. The donor table in
 [map-to-max.md](map-to-max.md) lists archs by *attention/MLP shape*
-(GQA vs MLA vs MoE) but not by *distribution shape* (single-GPU,
-tensor-parallel, DP+EP). Different distribution shapes use different
-framework base classes, different file patterns, and have different
-debug-time pitfalls. Picking the wrong distribution-shape donor is the
-single most expensive routing mistake in this workflow — you discover
-it when the first ``max serve`` crashes in ``_unflatten_kv_inputs``
-on a multi-GPU launch.
-
-This reference covers the decision rule, the donor mapping, and the
-non-obvious pitfalls.
+(GQA vs MLA vs MoE). This reference covers *distribution shape*
+(single-GPU, tensor-parallel, DP+EP). A ModuleV3 port distributes by
+placing the module on a `DeviceMesh` and tagging weights with placements, so
+the same `forward()` serves one GPU or many. The decisions are which mesh
+axes the port uses and which weights shard over them.
 
 ## Decision rule (run at plan-and-veto)
 
@@ -33,7 +19,7 @@ weight_bytes ≈ total_params × bytes_per_param   (BF16 = 2, FP8 = 1, NVFP4 ≈
 gpus_needed ≈ ceil(weight_bytes / (gpu_hbm × 0.6))
 ```
 
-Examples on a ~180 GB HBM GPU:
+The table applies the rule to a GPU with ~180 GB of HBM:
 
 | Model                         | Weight bytes | gpus_needed | Distribution shape                |
 |-------------------------------|--------------|-------------|-----------------------------------|
@@ -41,136 +27,123 @@ Examples on a ~180 GB HBM GPU:
 | Llama-3-70B BF16              | ~140 GB      | 2–4         | Multi-GPU TP                      |
 | Mixtral-8x7B BF16             | ~95 GB       | 1–2         | Single-GPU MoE (or small TP)      |
 | Qwen3-30B-A3B BF16            | ~62 GB       | 1           | Single-GPU MoE (or TP for speed)  |
-| Large MoE (~200B active) BF16 | ~400+ GB     | 4–8         | Multi-GPU MoE (DP+EP recommended) |
+| Large MoE (~200B total) BF16  | ~400+ GB     | 4–8         | Multi-GPU MoE (DP+EP recommended) |
 | DeepSeek-V3 BF16              | ~1.3 TB      | 8–16        | Multi-GPU MoE + MLA               |
 
-The rule covers ~95% of cases. The edge case is when KV cache dominates
+The rule breaks down when KV cache dominates
 (extremely long context) and pushes a model into multi-GPU even if the
-weights fit. If ``max_position_embeddings × num_kv_heads × head_dim ×
-dtype × num_layers × batch ≈ HBM cushion``, recompute with the KV
-cache included.
+weights fit. If ``2 × max_position_embeddings × num_kv_heads × head_dim ×
+bytes_per_element × num_layers × batch ≈ HBM cushion``, recompute with the
+KV cache included.
 
 ## Donor mapping by distribution shape
 
-Pick the donor whose distribution shape matches yours, not just whose
-attention/MLP shape matches.
+Pick the donor whose distribution shape matches yours, as well as its
+attention/MLP shape.
 
-| Your shape                  | Donor                                              | Framework base                                                             | When to use                                                                             |
-|-----------------------------|----------------------------------------------------|----------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
-| Single-GPU dense            | ``llama3``, ``mistral``                            | ``Transformer``                                                            | ≤30B BF16 typically; one GPU                                                            |
-| Single-GPU MoE              | ``qwen3`` (dense + MoE auto-detect)                | ``Transformer`` (some variants use distributed base even at single device) | MoE that fits on one GPU                                                                |
-| Multi-GPU TP (dense)        | ``llama3`` with sharding wired, or ``qwen3``       | ``DistributedLogitsPostprocessMixin + Module``                             | 70B–200B dense across 2–8 GPUs                                                          |
-| Multi-GPU TP (MoE)          | ``qwen3`` (distributed mode)                       | ``DistributedLogitsPostprocessMixin + Module``                             | MoE where attention TP + uniform expert sharding works                                  |
-| Multi-GPU **DP + EP** (MoE) | ``qwen3`` (Qwen3-30B-A3B path), ``deepseekV3``     | ``DistributedLogitsPostprocessMixin + Module`` + ``EPBatchManager``        | Large MoE where data-parallel attention + expert-parallel MoE is the right partitioning |
-| MLA + MoE                   | ``deepseekV3`` only                                | Same base as above                                                         | MLA latent-KV families                                                                  |
+| Your shape                  | Donor                                      | Mesh                             | When to use                                                                             |
+|-----------------------------|--------------------------------------------|----------------------------------|-----------------------------------------------------------------------------------------|
+| Single-GPU dense            | `llama3_modulev3`, `olmo3`                 | `.to(self.devices[0])`           | ≤30B BF16 typically, one GPU                                                            |
+| Single-GPU MoE              | `gpt_oss_modulev3`                         | `.to(self.devices[0])`           | MoE that fits on one GPU                                                                |
+| Multi-GPU TP (dense)        | `gemma3_modulev3`                          | 1-D `("tp",)`                    | 70B–200B dense across 2–8 GPUs                                                          |
+| Multi-GPU TP (MoE)          | `deepseekV3_modulev3`                      | 1-D `("tp",)`                    | MoE where attention TP + uniform expert sharding works                                  |
+| Multi-GPU **DP + EP** (MoE) | `deepseekV3_modulev3`, `kimik2_5_modulev3` | 1-D `("dp",)` + `EPBatchManager` | Large MoE where data-parallel attention + expert-parallel MoE is the right partitioning |
+| MLA + MoE                   | `deepseekV3_modulev3`                      | `("tp",)` or `("dp",)`           | MLA latent-KV families                                                                  |
 
-The framework base class is the load-bearing distinction. A
-``Transformer``-based file expects single-device tensors and a single
-``freqs_cis`` per call. A ``DistributedLogitsPostprocessMixin + Module``
-file expects per-device tensor lists everywhere and explicit allreduce
-between attention/MLP. They are not interchangeable, and a sed-rename
-between the two will fail at ``max serve`` startup with
-``_unflatten_kv_inputs`` mismatching the KV cache input count.
+Set `multi_gpu_supported=True` in `arch.py` for a port that shards.
 
-## What changes when you go multi-GPU
+## The mesh
 
-If your single-GPU port is working and you need to scale up, **you
-cannot just pass ``--devices gpu:0,1,2,3``**. The graph itself needs
-rewriting. The work is mechanical but non-trivial:
-
-### File-level
-
-- Class base swap: ``class MyModel(Transformer)`` →
-  ``class MyModel(DistributedLogitsPostprocessMixin, Module)``.
-- Block constructed once, sharded explicitly: each block creates
-  ``self.self_attn = Attention(...)``, calls ``self.self_attn.shard
-  (devices)`` to get a per-device list, and stores both
-  (``self.self_attn`` + ``self.self_attn_shards``).
-- Layer list: ``self.layers = LayerList([...])``, not a Python list.
-- Forward signature: every tensor argument becomes a list-of-tensors,
-  one per device. ``def __call__(self, layer_idx, xs, kv_collections,
-  freqs_cis, input_row_offsets, signal_buffers)`` where each of those
-  (except ``layer_idx``) is a list.
-
-### Per-block forward
+`model.py` builds the mesh and constructs the module inside
+`default_device(mesh)`, so every weight is created on the mesh. The axis name
+tells the parallel layers which mesh axis to shard over: `"tp"` for tensor
+parallelism, `"dp"` for data parallelism
+(`max.experimental.nn.common_layers.mesh_axis`):
 
 ```python
-def __call__(
-    self,
-    layer_idx,
-    xs,
-    kv_collections,
-    freqs_cis,
-    input_row_offsets,
-    signal_buffers,
-):
-    # 1. Norm each device's hidden state in parallel.
-    norm_xs = forward_sharded_layers(self.input_layernorm_shards, xs)
+from max.experimental.sharding import DeviceMesh
+from max.experimental.tensor import default_device
 
-    # 2. Attention on each device's shard of heads.
-    attn_outs = [
-        shard(
-            layer_idx,
-            norm_xs[i],
-            kv_collections[i],
-            freqs_cis[i],
-            input_row_offsets[i],
-        )
-        for i, shard in enumerate(self.self_attn_shards)
-    ]
 
-    # 3. TP mode: allreduce across attention shards.
-    if not self.use_dp and len(self.devices) > 1:
-        attn_outs = self.allreduce(attn_outs, signal_buffers)
-
-    # 4. MLP / MoE on each shard.
-    mlp_outs = forward_sharded_layers(self.mlp_shards, post_attn_xs)
-    if not self.use_dp and len(self.devices) > 1:
-        mlp_outs = self.allreduce(mlp_outs, signal_buffers)
-
-    # 5. Residuals per-device.
-    return [x + a + m for x, a, m in zip(xs, attn_outs, mlp_outs)]
+def _instantiate_module(self, model_config: MyConfig) -> MyModel:
+    n_devices = len(self.devices)
+    mesh = DeviceMesh(tuple(self.devices), (n_devices,), ("tp",))
+    with default_device(mesh):
+        return MyModel(model_config, self.kv_params)
 ```
 
-The pattern is the same regardless of architecture. What changes
-between ports is *what* the attention and MLP do, not the
-shard-and-allreduce skeleton.
+`Module.to()` moves a module to one device and raises for a multi-device
+mesh, so a sharded port can't build on one device and move afterward.
 
-### Embeddings + LM head
+`gemma3_modulev3/model.py` builds the mesh here. `deepseekV3_modulev3/model.py`
+builds it in `_create_model_config()` and stores it on the config, so modules
+that need the mesh during construction can read `config.mesh`. It picks the
+`"dp"` axis name when `data_parallel_degree > 1`.
 
-- ``self.embed_tokens = VocabParallelEmbedding(...)``: shards the vocab
-  across devices; returns a per-device hidden-state list directly.
-- ``self.lm_head = ColumnParallelLinear(...)``: shards output channels;
-  needs signal_buffers for the final allreduce.
-- Tied embeddings: ``ColumnParallelLinear(tied_weight=embed_tokens.weight,
-  ...)`` — share the tensor identity, not a copy.
+## Sharded layers
 
-### Inputs
+Tag each weight with how it shards. A layer built under `default_device(mesh)`
+creates each shard on its device:
 
-- ``signal_buffers`` is required even for nominally-TP-only models if
-  the embedding or LM head are vocab-parallel (they always are in this
-  base class). Mark the slug ``class MyModel(AlwaysSignalBuffersMixin,
-  LlamaModelBase)`` in ``model.py``.
-- The ``input_types()`` method now returns ``base_inputs +
-  signal_buffer_types + flattened_kv_types`` — three concatenated
-  groups, in that order.
-- ``_build_graph`` unpacks accordingly:
-  ``tokens, input_row_offsets, return_n_logits, *variadic = graph.inputs``
-  then peel signal buffers and KV cache inputs by count.
+- **Column-parallel** (Q/K/V projections, MLP gate and up, LM head):
+  `ColumnParallelLinear(in_dim, out_dim, bias=False)`, or
+  `col_parallel(Linear(...))` on an existing layer. Each device holds a slice
+  of the output features.
+- **Row-parallel** (attention output, MLP down): `RowParallelLinear(...)` or
+  `row_parallel(Linear(...))`. Each device holds a slice of the input
+  features and produces a partial sum.
+- **Vocab-parallel embedding**: `VocabParallelEmbedding(vocab_size,
+  dim=hidden_size)` from `max.experimental.nn.common_layers.embedding`.
+
+All of these live in `max.experimental.nn.common_layers.linear` unless noted.
+`gemma3_modulev3/layers/attention.py` is the reference for a TP attention
+module.
+
+## Collectives
+
+The sharding solver tracks each tensor's placement (`Replicated`, `Sharded`,
+`Partial`) and inserts the collective an op needs. In
+`gemma3_modulev3/layers/transformer_block.py`, the row-parallel attention
+output is a `Partial` sum, and the post-attention norm that consumes it
+inserts the all-reduce. The block's `forward()` has no explicit collective.
+
+Call a collective directly when the port controls where the reduction
+happens:
+
+- `F.allreduce_sum(t)`: `Partial` → `Replicated`.
+- `F.reduce_scatter(t, scatter_axis=0)`: `Partial` → `Sharded`.
+- `F.allgather(t, tensor_axis=-1)`: `Sharded` → `Replicated` (tied LM head in
+  `gemma3_modulev3/gemma3.py`).
+- `F.transfer_to(t, mapping)`: any placement change.
+
+`deepseekV3_modulev3/layers/transformer_block.py` switches between these per
+parallelism mode (TP attention with TP or EP MoE, DP attention with EP MoE).
+
+## Expert parallelism
+
+EP routes tokens to experts on other devices through NVSHMEM communication
+buffers. The pipeline model sets it up in `_init_distributed_runtime()`.
+That method builds an `EPBatchManager` and stores its input types in
+`self._modulev3_extra_input_types`, which the base class appends to the
+compile inputs. It also initializes the communication buffers. The MoE module
+receives the buffers as extra `forward()` inputs.
+`deepseekV3_modulev3/model.py` is the reference.
+
+## Per-device work
+
+Some steps run independently on each device, such as a gather over each data
+parallel replica's own rows. Wrap the per-device function with
+`F.functional()`. With no sharding rule, it runs on each device's shard. To
+call a helper that takes per-device lists, pass
+`[TensorValue(s) for s in t.local_shards]` and rebuild the result with
+`Tensor.from_shard_values(values, mapping)`. `gather_last_tokens()` and
+`split_replicated_batch()` in `deepseekV3_modulev3/deepseekV3.py` show both.
 
 ## Pitfalls specific to multi-GPU MoE
 
-Common failure modes on multi-GPU MoE ports:
+These failure modes are common on multi-GPU MoE ports:
 
-1. **``linear_cls = functools.partial(Linear, quant_config=...)`` is a
-   trap.** Binding ``quant_config`` into ``linear_cls`` makes every
-   ``Linear`` constructed via that partial inherit the global config —
-   even when the consuming module wants ``quant_config=None`` (e.g.
-   selective per-layer quantization). Solution: don't bind. Pass
-   ``Linear`` itself; have each call site specify ``quant_config``
-   explicitly.
-
-2. **Selective quantization needs per-layer routing.** ``QuantConfig``
+1. **Selective quantization needs per-layer routing.** ``QuantConfig``
    carries ``attn_quantized_layers`` and ``mlp_quantized_layers`` sets.
    When building each block, consult them:
 
@@ -182,39 +155,44 @@ Common failure modes on multi-GPU MoE ports:
    ```
 
    Without this, a model that quantizes only MoE (leaving attention
-   bf16) will have a graph expecting FP8 weights at attention positions
-   and crash at load.
+   bf16) builds attention parameters that expect FP8 weights and fails
+   `compile()` on the dtype check.
 
-3. **Dispatch dtype ≠ unquantized dtype.** For an FP8 model,
+2. **Dispatch dtype differs from unquantized dtype.** For an FP8 model,
    ``config.dtype == DType.float8_e4m3fn`` is the *dispatch* dtype. The
-   un-quantized sections (attention if not in ``attn_quantized_layers``,
-   the MoE router gate) are bf16 on disk. Pass an explicit
-   ``DType.bfloat16`` to those Linears, not ``config.dtype``.
+   un-quantized sections (norms, biases, embeddings, attention if not in
+   ``attn_quantized_layers``, the MoE router gate) are bf16 on disk.
+   Override `_module_default_dtype()` to return `DType.bfloat16` so those
+   parameters build as bf16, as `deepseekV3_modulev3/model.py` does.
 
-4. **HF wraps multimodal configs.** Vision or conditional-generation
+3. **HF wraps multimodal configs.** Vision or conditional-generation
    config types nest the text backbone
-   under ``.text_config``. Framework methods (``calculate_max_seq_len``,
-   ``get_kv_params``) walk the *parent* config
-   by default. Override on the model class to unwrap before delegating.
+   under ``.text_config``. Framework methods (``calculate_max_seq_len`` on
+   the config class, ``get_kv_params`` on the pipeline model class) read the
+   *parent* config by default. Override them to pass ``.text_config``, as
+   ``kimik2_5_modulev3/model.py::get_kv_params`` does.
 
-5. **Quantization config ignore-list prefix mismatch.** Compressed-
+4. **Quantization config ignore-list prefix mismatch.** Compressed-
    tensors HF configs store ignore entries with the original prefix
-   (``model.language_model.layers.X.self_attn.q_proj``) but MAX's
-   ``parse_quant_config`` checks against the post-strip prefix
-   (``model.layers.X.self_attn.q_proj``). Rewrite the ignore list
-   before delegating to ``parse_quant_config`` if your model is
-   multimodal-wrapped.
+   (``model.language_model.layers.X.self_attn.q_proj``). MAX's
+   ``parse_quant_config`` checks them against ``ignored_modules_prefix``,
+   which defaults to ``model.`` (``model.layers.X.self_attn.q_proj``). For a
+   multimodal-wrapped model, pass
+   ``ignored_modules_prefix="model.language_model."``, as
+   ``gemma4/model_config.py`` does.
 
-6. **Per-device freqs_cis lists.** For NoPE on full-attention layers
-   (some MoE and Gemma families), build two per-device lists at graph entry —
-   ``real_freqs_cis`` from the rotary embedding and
-   ``identity_freqs_cis`` (cos=1, sin=0). Select per layer by
-   ``layer_types[i]``. The identity table must match the layout of
-   ``rope.freqs_cis`` exactly, including the ``max_seq_len * 2`` row
-   count (the rotary embedding pre-allocates 2× for decode positions
-   past prefill).
+5. **RoPE tables on the mesh.** Move `freqs_cis` to the mesh before use
+   (`rope.freqs_cis.cast(dtype).to(mesh)`, as
+   `Gemma3TextModel.prepare_freq_cis()` does). For NoPE layers, build an
+   identity table (cos=1, sin=0) next to the real one and select it per layer
+   with the field HF's attention checks (``layer_types[i]`` or
+   ``no_rope_layers[i]``, see
+   [divergences.md](divergences.md#17-nope--skip-rope-layers-via-identity-freqs_cis)).
+   The identity table must match the layout of ``rope.freqs_cis``, including the
+   ``max_seq_len * 2`` row count (the rotary embedding pre-allocates 2× for
+   decode positions past prefill).
 
-7. **GPU memory zombies after ``pkill max serve``.** A multiprocessing
+6. **GPU memory zombies after ``pkill max serve``.** A multiprocessing
    spawn worker can survive ``kill -9`` and hold HBM as a defunct
-   (Z-state) process. Symptom: subsequent serve attempts see only
-   far less free HBM than expected on each device.
+   (Z-state) process. Symptom: later serve attempts see less
+   free HBM than expected on each device.

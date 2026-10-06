@@ -14,11 +14,14 @@
 
 Fetches the repo's raw ``config.json`` from the Hub and maps every key to the
 MAX API surface (``pipeline_config.model.huggingface_config``, ``arch.py``,
-``model_config.py``).
+``model_config.py``). With ``--start-from <donor>``, it also marks each key
+the donor's config sources never mention: those are the config deltas the
+port handles in ``from_donor()``.
 
 Usage:
-    pixi run python inspect_hf.py <HF_MODEL_ID>
-    pixi run python inspect_hf.py <HF_MODEL_ID> --output report.md
+    pixi run python scripts/inspect_hf.py <HF_MODEL_ID>
+    pixi run python scripts/inspect_hf.py <HF_MODEL_ID> --start-from llama3_modulev3
+    pixi run python scripts/inspect_hf.py <HF_MODEL_ID> --output report.md
 """
 
 from __future__ import annotations
@@ -30,17 +33,24 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from .donor import Donor, DonorError, load_donor
     from .hub_config import hub_config_url, load_hub_config
-    from .max_arch_paths import list_native_arch_mapping
+    from .max_arch_paths import find_arch_dir, list_native_arch_mapping
 except ImportError:
     # Standalone invocation: `python /path/to/inspect_hf.py ...`
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from donor import (  # type: ignore[no-redef]
+        Donor,
+        DonorError,
+        load_donor,
+    )
     from hub_config import (  # type: ignore[no-redef]
         hub_config_url,
         load_hub_config,
     )
-    from max_arch_paths import (
-        list_native_arch_mapping,  # type: ignore[no-redef]
+    from max_arch_paths import (  # type: ignore[no-redef]
+        find_arch_dir,
+        list_native_arch_mapping,
     )
 
 # Keys whose MAX destination is not a 1:1 huggingface_config attribute.
@@ -52,12 +62,42 @@ MAX_API_OVERRIDES: dict[str, str] = {
 }
 
 
-def max_api_for(key: str) -> str:
+# Keys that configure tokenization, training, or the HF runtime, not the
+# inference forward pass (dropout is off at inference). A donor's config never
+# needs to read them.
+NOT_ARCHITECTURE = frozenset(
+    {
+        "attention_dropout",
+        "hidden_dropout",
+        "bos_token_id",
+        "eos_token_id",
+        "pad_token_id",
+        "initializer_range",
+        "transformers_version",
+        "use_cache",
+        "pretraining_tp",
+        "_name_or_path",
+        "output_attentions",
+        "output_hidden_states",
+        "return_dict",
+    }
+)
+
+
+def max_api_for(key: str, donor: Donor | None = None) -> str:
     if key in MAX_API_OVERRIDES:
         return MAX_API_OVERRIDES[key]
+    source = f"`pipeline_config.model.huggingface_config.{key}`"
+    if key in NOT_ARCHITECTURE:
+        return f"{source}; not used by the inference forward pass"
+    if donor is None:
+        return source
+    if key in donor.config_names:
+        return f"{source}; mentioned in `{donor.config.name}`'s sources"
     return (
-        f"`pipeline_config.model.huggingface_config.{key}` "
-        f"→ read in `MyConfig.initialize()` / set on `MyConfig`"
+        f"{source}; **not in `{donor.config.name}`'s sources**: check HF's "
+        f"modeling code, and handle it in `from_donor()` if the forward pass "
+        f"reads it"
     )
 
 
@@ -73,7 +113,9 @@ def format_value(value: Any) -> str:
     return text
 
 
-def config_mapping_lines(cfg: dict) -> list[str]:
+def config_mapping_lines(
+    cfg: dict[str, Any], donor: Donor | None = None
+) -> list[str]:
     lines = [
         "## config.json → MAX API",
         "",
@@ -82,7 +124,7 @@ def config_mapping_lines(cfg: dict) -> list[str]:
     ]
     for key in sorted(cfg):
         value = format_value(cfg[key])
-        api = max_api_for(key)
+        api = max_api_for(key, donor)
         lines.append(f"| `{key}` | {value} | {api} |")
     lines.append("")
     return lines
@@ -91,13 +133,13 @@ def config_mapping_lines(cfg: dict) -> list[str]:
 def native_arch_lines(arch_class: str, hf_id: str) -> list[str]:
     """Guard: is architectures[0] already registered in MAX?"""
     mapping = list_native_arch_mapping()
-    lines = ["## Guard — Native in MAX?", ""]
+    lines = ["## Guard: Native in MAX?", ""]
     if not mapping:
         lines.extend(
             [
                 "Could not read the MAX registry (MAX not installed in this Python env).",
                 "Install MAX with pixi, then run:",
-                f"`pixi run python list_native_archs.py --match {arch_class}`",
+                f"`pixi run python scripts/list_native_archs.py --match {arch_class}`",
                 "",
             ]
         )
@@ -108,7 +150,7 @@ def native_arch_lines(arch_class: str, hf_id: str) -> list[str]:
             [
                 f"`{arch_class}` is **already registered** in MAX.",
                 "",
-                "Stop here — no port needed. Serve the Hub checkpoint:",
+                "MAX serves this architecture without a port. Serve the Hub checkpoint:",
                 "",
                 "```bash",
                 f"pixi run max serve --model {hf_id}",
@@ -119,10 +161,10 @@ def native_arch_lines(arch_class: str, hf_id: str) -> list[str]:
     else:
         lines.extend(
             [
-                f"`{arch_class}` is **not** in the MAX registry — continue with Phase 1.",
+                f"`{arch_class}` is **not** in the MAX registry. Continue with Phase 1.",
                 "",
                 "```bash",
-                f"pixi run python list_native_archs.py --match {arch_class}  # exit 1",
+                f"pixi run python scripts/list_native_archs.py --match {arch_class}  # exit 1",
                 "```",
                 "",
             ]
@@ -130,7 +172,9 @@ def native_arch_lines(arch_class: str, hf_id: str) -> list[str]:
     return lines
 
 
-def build_report(hf_id: str, cfg: dict) -> str:
+def build_report(
+    hf_id: str, cfg: dict[str, Any], donor: Donor | None = None
+) -> str:
     arch = (cfg.get("architectures") or ["Unknown"])[0]
     model_type = cfg.get("model_type", "unknown")
 
@@ -143,7 +187,7 @@ def build_report(hf_id: str, cfg: dict) -> str:
         "",
     ]
     lines.extend(native_arch_lines(arch, hf_id))
-    lines.extend(config_mapping_lines(cfg))
+    lines.extend(config_mapping_lines(cfg, donor))
     lines.extend(
         [
             "## Where the modeling code lives",
@@ -157,11 +201,11 @@ def build_report(hf_id: str, cfg: dict) -> str:
             "Read in this order: model `__init__`, attention `forward`, MLP `forward`, "
             "block class, final LM head.",
             "",
-            "## Checklist (complete before implementing the graph)",
+            "## Checklist (complete before implementing the module)",
             "",
             "- [ ] Confirmed `architectures[0]` not already in MAX (see guard above)",
             "- [ ] Delta list written (one row per HF vs donor difference)",
-            "- [ ] Every config.json key has a plan in `model_config.py` / nn layers",
+            "- [ ] Every config.json key has a plan in `model_config.py` / module layers",
             "- [ ] Read attention `forward` and noted Q/K/V layout, RoPE style, mask",
             "- [ ] Read MLP `forward` and noted gated/non-gated shape and activation",
             "- [ ] Read block class and noted pre-norm / post-norm / peri-LN pattern",
@@ -177,6 +221,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--output", type=Path, help="Write report here (default: stdout)"
     )
+    parser.add_argument(
+        "--start-from",
+        help="ModuleV3 donor slug; marks the config.json keys its config "
+        "sources never mention",
+    )
 
 
 def main(args: argparse.Namespace) -> int:
@@ -184,7 +233,13 @@ def main(args: argparse.Namespace) -> int:
         cfg = load_hub_config(args.hf_id)
     except Exception as exc:
         sys.exit(f"Failed to fetch config.json for {args.hf_id!r}: {exc}")
-    report = build_report(args.hf_id, cfg)
+    donor = None
+    if args.start_from:
+        try:
+            donor = load_donor(find_arch_dir(args.start_from))
+        except DonorError as exc:
+            sys.exit(str(exc))
+    report = build_report(args.hf_id, cfg, donor)
 
     if args.output:
         args.output.write_text(report)

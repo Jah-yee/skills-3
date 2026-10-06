@@ -56,7 +56,18 @@ def encoding_from_config_dict(cfg: dict) -> str | None:
     return None
 
 
-def canonical_native_dtype(hub_dtype: str) -> str:
-    """Map a Hub dtype string to the ``default_encoding`` value used in ``arch.py``."""
+# Hub config values that name no dtype of their own.
+_ABSTRACT_HUB_DTYPES = frozenset({"auto"})
+
+
+def canonical_native_dtype(hub_dtype: str) -> str | None:
+    """Map a Hub dtype string to the ``default_encoding`` value used in ``arch.py``.
+
+    Returns ``None`` for a value that names no dtype of its own, such as
+    ``"auto"``. An unknown concrete dtype passes through so the encoding
+    gate can report it as unsupported.
+    """
     key = hub_dtype.strip().lower()
+    if key in _ABSTRACT_HUB_DTYPES:
+        return None
     return _HUB_TO_ENCODING.get(key, key)

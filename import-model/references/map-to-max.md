@@ -1,87 +1,96 @@
-# Picking a starting MAX architecture
+# Pick a starting MAX architecture
 
-You're answering: which already-ported MAX architecture is closest to mine?
-The closest one becomes the starting point when you scaffold; you
-implement deltas while implementing the graph.
+You're answering: which ModuleV3 architecture is closest to mine? The
+closest one becomes the starting point when you scaffold. You implement the
+deltas while implementing the module.
 
-## Listing what's available
+## List what's available
 
-Do not maintain a static slug list here; it drifts every MAX release. List
-what your installed MAX registers:
+Don't maintain a static slug list here, because it drifts every MAX
+release. List the ModuleV3 architectures your installed MAX ships:
 
 ```bash
-pixi run python scripts/list_native_archs.py
+pixi run python scripts/list_native_archs.py --donors
 ```
 
-That script, `list_native_archs.py` in this skill's `scripts/`, prints
-`HF_architectures[0] → max_slug` from the arch trees on disk. Pick a donor
-slug from the output, then open `max/pipelines/architectures/<slug>/` in your
-installed MAX package.
+That script, `list_native_archs.py` in this skill's `scripts/`, prints each
+ModuleV3 architecture's slug and registered name from the arch trees on
+disk. Pick a donor slug from the output, then open
+`max/pipelines/architectures/<slug>/` in your installed MAX package.
 
 ## Decision table
 
-These are mostly V2 architectures. A new port is ModuleV3: use the row to
-find the family, then start from its `_modulev3` sibling where one exists
-(`llama3_modulev3`, `qwen3_modulev3`, `gemma3_modulev3`, `phi3_modulev3`,
-`granite_modulev3`, `deepseekV3_modulev3`, `gpt_oss_modulev3`) or from
-`olmo3`.
-
 Map the `config.json` findings to a starting arch:
 
-| HF signal                                      | Starting arch                                         |
-|------------------------------------------------|-------------------------------------------------------|
-| `LlamaForCausalLM` (or compatible)             | `llama3`                                              |
-| `Qwen2ForCausalLM`                             | `qwen2`                                               |
-| `Qwen3ForCausalLM` (with `use_qk_norm`)        | `qwen3`                                               |
-| `MistralForCausalLM` with `sliding_window`     | `mistral`                                             |
-| `Gemma3ForCausalLM`                            | `gemma3`                                              |
-| `Phi3ForCausalLM` with `partial_rotary_factor` | `phi3`                                                |
-| `GraniteForCausalLM` (MuP scalars)             | `granite`                                             |
-| Any `*MoEForCausalLM` (sparse experts, top-k)  | `qwen3` (registers `Qwen3MoeForCausalLM`)             |
-| `DeepseekV3ForCausalLM`, MLA + MoE             | `deepseekV3`                                          |
-| Encoder-decoder audio                          | `whisper`                                             |
-| `*ForSequenceClassification` text encoder      | none stock; start from any decoder, drop the LM head  |
-| Vision-language (image + text)                 | `qwen2_5vl` or `internvl`                             |
+| HF signal                                       | Starting arch                                                         |
+|-------------------------------------------------|-----------------------------------------------------------------------|
+| `LlamaForCausalLM` (or compatible)              | `llama3_modulev3`                                                     |
+| `Qwen2ForCausalLM`, `Qwen3ForCausalLM`          | `llama3_modulev3`, with QK-norm from `gemma3_modulev3`                |
+| `layer_types` mixing sliding and full attention | `olmo3` or `gemma3_modulev3`                                          |
+| `Gemma3ForCausalLM`                             | `gemma3_modulev3`                                                     |
+| `Phi3ForCausalLM` (fused `qkv_proj`)            | `phi3_modulev3`                                                       |
+| `GraniteForCausalLM` (MuP scalars)              | `granite_modulev3`                                                    |
+| Any `*MoeForCausalLM` (sparse experts, top-k)   | `gpt_oss_modulev3`                                                    |
+| `DeepseekV2ForCausalLM`, MLA on one GPU         | `deepseekV2_modulev3`                                                 |
+| `DeepseekV3ForCausalLM`, MLA + MoE across GPUs  | `deepseekV3_modulev3`                                                 |
+| Hybrid attention and Mamba layers               | `nemotron_h_modulev3`                                                 |
+| Vision-language (image + text)                  | `gemma3multimodal_modulev3`, `idefics3_modulev3`, `kimik2_5_modulev3` |
+| `*ForMaskedLM` / sentence-embedding encoder     | `mpnet_modulev3`, `qwen3_embedding_modulev3`                          |
+
+`gemma3_modulev3` puts QK-norm per head (Qwen3's layout). `olmo3` puts it
+across the full projection width. Check which one HF does.
+
+`phi3_modulev3` rotates the full head dimension. No single-module ModuleV3
+donor implements partial RoPE, so a `partial_rotary_factor` below 1 is a delta
+you implement. `ProportionalRotaryEmbedding` in
+`gemma4_modulev3/layers/rotary_embedding.py` is a ModuleV3 example to copy.
+
+The vision-language donors build several compiled modules (vision tower and
+language model). Scaffold them with `scaffold.py --full-copy`, which copies
+every donor file and renames it. The default subclass skeleton covers
+single-module donors.
 
 ## When nothing fits
 
 If your config has multiple uncommon signals (for example, MLA *and* a custom
 routing scheme, or recurrence with non-standard memory), no template will
-match. Two paths:
+match. Pick one of these paths:
 
-- Pick the closest decoder and write the unique pieces from scratch with
-  ModuleV3 primitives (`max.experimental.nn`). Accept that the
-  scaffold-stage parity check will fail until you replace the divergent
-  module.
+- Pick the closest decoder and write the unique pieces from scratch as
+  `Module` subclasses built from `max.experimental.nn` and
+  `max.experimental.functional`. Accept that the scaffold-stage parity check
+  will fail until you replace the divergent module.
 - See [recognize-walls.md](recognize-walls.md): some architectures aren't
   portable with the public MAX surface today.
 
-## Reading the chosen arch
+## Read the chosen arch
 
-Once you've picked, read its source in your installed MAX package:
-
-`max/pipelines/architectures/<chosen_slug>/<chosen_slug>.py`
+Once you've picked, read its source in your installed MAX package. Start from
+`max/pipelines/architectures/<chosen_slug>/model.py`: its
+`_instantiate_module()` names the root module, and the file that defines that
+module is the one to read next (`olmo3/olmo3.py`, `llama3_modulev3/llama3.py`).
 
 What you're looking for:
 
-- The top-level model class: usually inherits from a base in
-  `max.pipelines.lib`, on both lanes.
-- The block class: on V2 it usually inherits from `TransformerBlock`
-  in `max.nn.transformer`. On ModuleV3 there is no shared base; each
-  architecture defines its own block as a `Module` (for example,
-  `olmo3/layers/transformer.py`).
-- The attention class: on V2 it usually inherits from `AttentionWithRope`
-  or similar. On ModuleV3 it is a `Module` over `Tensor` and
-  `PagedCacheValues` (for example, `olmo3/layers/attention.py`), composed
-  from `max.experimental.nn.common_layers` and `max.experimental.nn.rope`.
-- The MLP class: on V2 it usually inherits from `MLP` (SwiGLU) in
-  `max.nn`. On ModuleV3 it is a `Module` built from
-  `max.experimental.nn.linear` and the activations in
-  `max.experimental.nn.common_layers`.
+- The pipeline model class in `model.py`: it subclasses
+  `ModuleV3PipelineModelWithKVCache` from `max.pipelines.lib`, directly or
+  through another architecture's model (`phi3_modulev3` reuses
+  `llama3_modulev3`'s).
+- The root module: a `Module` whose `forward()` unflattens the KV cache inputs
+  and calls a text model, often stored as `self.language_model`, which sets
+  the weight-name prefix.
+- The block class: each architecture defines its own block as a `Module`
+  (for example, `olmo3/layers/transformer.py`).
+- The attention class: a `Module` over `Tensor` and `PagedCacheValues` (for
+  example, `olmo3/layers/attention.py`), composed from
+  `max.experimental.nn.common_layers` and the fused kernels in
+  `common_layers.functional_kernels`.
+- The MLP class: `MLP` from `max.experimental.nn.common_layers.mlp`, or a
+  `Module` built from `max.experimental.nn.Linear` and the activations in
+  `max.experimental.functional`.
 
-These inheritance chains tell you what is available to subclass when you
-hit "I need to change one method." If you change just one method on a
-subclass, your port stays small.
+These classes show what you can subclass when you need to change one
+method. A subclass that overrides one method keeps your port small.
 
 ## Output of the comparison
 
@@ -93,4 +102,4 @@ A short note for yourself:
 - **What I need to subclass:** (attention? MLP? block?)
 - **What I need to add:** (extra norms, MoE routing, multi-step head)
 
-This note becomes the edit list when you implement the graph.
+This note becomes the edit list when you implement the module.
