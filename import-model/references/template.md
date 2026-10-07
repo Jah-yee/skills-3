@@ -151,10 +151,13 @@ pixi run python scripts/run_oss_gates.py <HF_MODEL_ID> --port-dir <port_dir>
 ### Guard: smoke gate
 
 ```bash
+pixi run ruff format <port_dir>
+pixi run ruff check <port_dir>
 pixi run python scripts/check_port.py <HF_MODEL_ID> --port-dir <port_dir>
 ```
 
-No missing or mismatched parameters, and each unconsumed tensor explained.
+`ruff check` reports no errors. No missing or mismatched parameters, and each
+unconsumed tensor explained.
 Weights-format preflight from `references/serve-and-iterate.md`
 passes.
 

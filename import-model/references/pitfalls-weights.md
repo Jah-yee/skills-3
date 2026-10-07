@@ -80,26 +80,32 @@ the adapter, or override `_prepare_state_dict()` in `model.py`.
 `RuntimeError: Unsupported dtype in DLTensor` when the underlying
 buffer is bfloat16 (or fp8, fp4, etc.). NumPy has no native bfloat16
 dtype. For BF16 weight manipulation in a weight adapter (slicing,
-reshaping, repacking), use torch as the DLPack bridge:
+reshaping, repacking), view the buffer as `uint16`, which has the same
+byte width, transform it in NumPy, then view the result as bfloat16
+again (`step3p5/weight_adapters.py`):
 
 ```python
-import torch
+from max.driver import Buffer
+from max.dtype import DType
 from max.graph import Shape
 from max.graph.weights import WeightData
 
-t = torch.from_dlpack(weight_data.data)
-t_sliced = t[:vocab_size].contiguous()
+buf = Buffer.from_dlpack(weight_data.data)
+if weight_data.dtype == DType.bfloat16:
+    buf = buf.view(DType.uint16)
+arr = buf.to_numpy()[:vocab_size].copy()
 new_wd = WeightData(
-    data=t_sliced,
-    name=name,
-    dtype=weight_data.dtype,
-    shape=Shape((vocab_size, hidden_size)),
-    quantization_encoding=weight_data.quantization_encoding,
+    Buffer.from_numpy(arr).view(weight_data.dtype, list(arr.shape)),
+    name,
+    weight_data.dtype,
+    Shape(arr.shape),
 )
 ```
 
 `WeightData.shape` is a `max.graph.Shape`. Wrap the dimensions in
-`Shape((...))`.
+`Shape(...)`. A row or column reorder needs no float math, so the `uint16`
+view carries it without changing a bit. For arithmetic on the values, cast
+first with `weight_data.astype(DType.float32)`.
 
 ## Embedding row-count may exceed `vocab_size`
 
@@ -112,5 +118,5 @@ and `lm_head` has 128256. A MAX `Embedding` sized at `vocab_size` fails the
 shape check on 128264-row weights. The weight adapter must slice the first
 `vocab_size` rows of `embed_tokens.weight`. The extra rows are reserved
 special tokens that never appear in text-only generation, so truncation is
-safe for that scope. Use the torch-DLPack pattern above, because NumPy
-crashes on BF16.
+safe for that scope. Use the `uint16` view pattern above, because NumPy
+has no BF16 dtype.

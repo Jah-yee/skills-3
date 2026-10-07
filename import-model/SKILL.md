@@ -297,6 +297,15 @@ by side.
 After scaffold, `<slug>.py` still computes the donor's math. Don't serve
 until the module is implemented.
 
+The scaffold formats the port with `ruff format` and rewrites the donor's
+`huggingface_config.rope_theta` reads to `get_rope_theta(huggingface_config)`,
+which reads the value under both Transformers 4 and Transformers 5. A port
+scaffolded with an earlier version of this skill can still read
+`huggingface_config.rope_theta` in `model.py` and fail
+`check_port.py` with `AttributeError: ... has no attribute 'rope_theta'`.
+Re-scaffold it, or make the same edit by hand and import `get_rope_theta`
+from `max.pipelines.lib.pipeline_variants.utils`.
+
 **Donor docstrings and code comments survive any donor code you copy.** The
 default scaffold writes fresh docstrings for its generated files. `--full-copy`
 mode keeps the donor's text, and so does any donor file you copy or
@@ -413,10 +422,18 @@ pixi run python scripts/run_oss_gates.py <HF_MODEL_ID> --port-dir <port_dir>
 > ```
 >
 > It exits 1 when `compile()` would fail. It reads the real checkpoint, so the
-> first run downloads the weights. `run_oss_gates.py` covers walls,
-> checkpoint metadata, and `arch.py` name/encoding. It doesn't replace this
-> check. See [serve-and-iterate.md](references/serve-and-iterate.md) for the
-> weights-format preflight.
+> first run downloads the weights. Format and lint the port before each
+> check, since your edits add code the scaffold didn't format:
+>
+> ```bash
+> pixi run ruff format <port_dir>
+> pixi run ruff check <port_dir>
+> ```
+>
+> `ruff check` must report no errors. `run_oss_gates.py` covers walls,
+> checkpoint metadata, and `arch.py` name/encoding. It doesn't replace
+> this check. See [serve-and-iterate.md](references/serve-and-iterate.md) for
+> the weights-format preflight.
 
 ---
 

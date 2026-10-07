@@ -395,6 +395,51 @@ class _RenameName(ast.NodeTransformer):
         return node
 
 
+_HF_CONFIG_NAMES = frozenset({"huggingface_config", "hf_config", "text_config"})
+"""Names that hold a Hugging Face config in donor code."""
+
+ROPE_THETA_IMPORT = ImportedName(
+    "max.pipelines.lib.pipeline_variants.utils", "get_rope_theta"
+)
+"""Reads ``rope_theta`` under both Transformers 4 and Transformers 5."""
+
+
+class _RopeThetaRewrite(ast.NodeTransformer):
+    """Rewrites ``<hf config>.rope_theta`` to ``get_rope_theta(<hf config>)``.
+
+    Transformers 5 moves ``rope_theta`` into ``rope_parameters``, so a donor
+    that reads the attribute raises ``AttributeError`` there, and a port
+    copied from it inherits the error.
+    """
+
+    def __init__(self) -> None:
+        self.rewrote = False
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        self.generic_visit(node)
+        holder = node.value
+        name = (
+            holder.id
+            if isinstance(holder, ast.Name)
+            else holder.attr
+            if isinstance(holder, ast.Attribute)
+            else None
+        )
+        if node.attr != "rope_theta" or name not in _HF_CONFIG_NAMES:
+            return node
+        if not isinstance(node.ctx, ast.Load):
+            return node
+        self.rewrote = True
+        return ast.copy_location(
+            ast.Call(
+                func=ast.Name(ROPE_THETA_IMPORT.name, ast.Load()),
+                args=[holder],
+                keywords=[],
+            ),
+            node,
+        )
+
+
 @dataclass
 class _BodyImports:
     """Imports a copied method body needs, split the way isort groups them."""
@@ -433,6 +478,8 @@ def _render_instantiate(donor: Donor, short: str) -> tuple[str, _BodyImports]:
     parsed, donor_fn = donor.instantiate
     fn = copy.deepcopy(donor_fn)
     fn = _RenameName(donor.module.name, short).visit(fn)
+    rope_theta = _RopeThetaRewrite()
+    fn = rope_theta.visit(fn)
     ast.fix_missing_locations(fn)
     body = [
         stmt
@@ -453,6 +500,11 @@ def _render_instantiate(donor: Donor, short: str) -> tuple[str, _BodyImports]:
     reads = dict.fromkeys(node.id for node in free_names(fn.body, params))
     for name in reads:
         if name == short:
+            continue
+        if rope_theta.rewrote and name == ROPE_THETA_IMPORT.name:
+            imports.names.append(
+                (ROPE_THETA_IMPORT.module, ROPE_THETA_IMPORT.name)
+            )
             continue
         plain = _plain_import(parsed, name)
         if plain is not None:

@@ -528,6 +528,76 @@ def test_scaffold_task_donors(
     _lint(files, f"port_{slug.lower()}", tmp_path)
 
 
+def test_rope_theta_rewrite() -> None:
+    """Hugging Face ``rope_theta`` reads go through ``get_rope_theta()``.
+
+    A MAX config's own ``rope_theta`` field and assignments stay as they are.
+    """
+    rewrite = templates._RopeThetaRewrite()
+    tree = rewrite.visit(
+        ast.parse(
+            "a = huggingface_config.rope_theta\n"
+            "b = self.huggingface_config.rope_theta\n"
+            "c = config.rope_theta\n"
+            "hf_config.rope_theta = 1.0\n"
+        )
+    )
+    assert rewrite.rewrote
+    assert ast.unparse(tree).splitlines() == [
+        "a = get_rope_theta(huggingface_config)",
+        "b = get_rope_theta(self.huggingface_config)",
+        "c = config.rope_theta",
+        "hf_config.rope_theta = 1.0",
+    ]
+
+
+@needs_tree
+def test_scaffold_reads_rope_theta_with_get_rope_theta(tmp_path: Path) -> None:
+    """The Qwen3 embedding donor's ``rope_theta`` read doesn't reach the port.
+
+    The donor reads ``huggingface_config.rope_theta``, which Transformers 5
+    moves into ``rope_parameters``.
+    """
+    files = _render_port("qwen3_embedding_modulev3", "Qwen3ForCausalLM").files
+    model = files["model.py"]
+    assert "huggingface_config.rope_theta" not in model
+    assert "get_rope_theta(huggingface_config)" in model
+    imports = _imports_from(ast.parse(model))
+    assert imports["get_rope_theta"] == (
+        "max.pipelines.lib.pipeline_variants.utils.get_rope_theta"
+    )
+    _lint(files, "port_qwen3_embedding_modulev3", tmp_path)
+
+
+def test_format_port_formats_long_lines(tmp_path: Path) -> None:
+    """``format_port`` leaves the port passing ``ruff format --check``."""
+    beside = Path(sys.executable).parent / "ruff"
+    ruff = str(beside) if beside.is_file() else shutil.which("ruff")
+    if ruff is None:
+        pytest.skip("ruff not installed")
+    (tmp_path / "model.py").write_text(
+        "x = dict(" + ", ".join(f"key_{i}={i}" for i in range(20)) + ")\n"
+    )
+    assert scaffold.format_port(tmp_path) is None
+    check = subprocess.run(
+        [ruff, "format", "--check", str(tmp_path)],
+        capture_output=True,
+        check=False,
+    )
+    assert check.returncode == 0
+
+
+def test_format_port_without_ruff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without ruff, ``format_port`` says how to format the port by hand."""
+    monkeypatch.setattr(scaffold.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(scaffold.sys, "executable", str(tmp_path / "python"))
+    problem = scaffold.format_port(tmp_path)
+    assert problem is not None
+    assert f"ruff format {tmp_path}" in problem
+
+
 @needs_tree
 @pytest.mark.parametrize(
     ("slug", "flag"),

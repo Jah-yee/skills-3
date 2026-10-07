@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
@@ -119,6 +120,32 @@ def write_port(dst: Path, write: Callable[[Path], None]) -> None:
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
+
+
+def format_port(dst: Path) -> str | None:
+    """Format the port with ``ruff format``. Returns why it couldn't, if so.
+
+    Scaffolded bodies come from ``ast.unparse``, which writes each statement
+    on one line, so the port fails ``ruff format --check`` until formatted.
+    """
+    # Prefer the ruff installed next to this interpreter, the one the
+    # skill's pixi environment pins, over any other ruff on PATH.
+    beside = Path(sys.executable).parent / "ruff"
+    ruff = str(beside) if beside.is_file() else shutil.which("ruff")
+    if ruff is None:
+        return (
+            f"ruff is not installed, so the port is unformatted. Install it "
+            f"and run `ruff format {dst}` before the smoke gate."
+        )
+    proc = subprocess.run(
+        [ruff, "format", "--quiet", str(dst)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return f"`ruff format {dst}` failed:\n{proc.stderr.strip()}"
+    return None
 
 
 def serve_task_flag(donor: Donor) -> str:
@@ -230,6 +257,9 @@ def main(args: argparse.Namespace) -> int:
                 print(f"WARNING: {warning}", file=sys.stderr)
     except DonorError as exc:
         sys.exit(str(exc))
+
+    if (problem := format_port(dst)) is not None:
+        print(f"WARNING: {problem}", file=sys.stderr)
 
     print()
     print(f"Scaffold created at: {dst}")
