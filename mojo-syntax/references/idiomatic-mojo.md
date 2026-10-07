@@ -81,10 +81,10 @@ Check the parameter's default before dropping it — removing an explicit
 A default is not a constraint: with `b_type: DType = a_type`, a check
 comparing the two never fires for callers that omit `b_type`.
 
-## 4. Tuples and variadic `Coord`, not `IndexList`/`Index`
+## 4. Build coordinates from tuples, not `IndexList`/`Index`
 
 Tuples convert implicitly to coordinate types. A single-element tuple is
-`(x,)`.
+`(x,)`. Don't create an `IndexList` or `Index` only to pass it on.
 
 ```mojo
 # WRONG                                   # CORRECT
@@ -92,15 +92,14 @@ Index(m, n)                               (m, n)
 f(Index(tokens))                          f((tokens,))
 t.load[width=1](IndexList[2](i, k))       t.load((i, k))
 Coord(IndexList[2](a, b))                 Coord(a, b)
+Coord(index_list[0], ..., index_list[N])  Coord(index_list)
 Coord(Idx[1], Idx[5])                     coord[1, 5]
 t.load((Idx[5], Idx[3]))                  t.load(coord[5, 3])
 ```
 
 If a mixed-type tuple fails to unify (e.g. `Tuple[Int, UInt32]`), cast the
-odd element; don't fall back to `IndexList`. `Coord` accepts both
-`Int32`- and `Int64`-backed index lists, so don't add canonicalizing
-conversions. Prefer the `coord` comptime helper for completely static
-shapes and sizes.
+odd element; don't fall back to `IndexList`. For fully static shapes and
+sizes, prefer the `coord` comptime helper.
 
 ## 5. `comptime` for compile-time-known work
 
