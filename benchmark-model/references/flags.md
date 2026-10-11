@@ -48,8 +48,9 @@ either `--num-prompts` or `--num-chat-sessions`.
   loads rather than saturating the server.
 - `--seed`: the workload RNG seed, default `24301` (fixed for reproducibility).
   `--seed none` draws a fresh one, then logs and records it.
-- `--workload-config`: a YAML file of workload options using hyphenated keys.
-  The CLI wins over the file.
+- `--workload-config`: a YAML file of workload options using hyphenated keys,
+  either flat at the top level or nested under a `native:` block beside
+  `runner: native`. The CLI wins over the file.
 
 ## Datasets
 
