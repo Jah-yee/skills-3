@@ -489,16 +489,34 @@ literal identity is spelling-based (`4` vs `0x4` are different keys).
 
 `if case pattern = value:` evaluates the value once, tests one pattern, and
 binds names for that block only; failure falls to the next `elif`/`else`.
-It's the `if let` idiom — use it to unwrap instead of
-`if opt: use(opt.value())`:
+It's the `if let` idiom — the preferred way to unwrap an `Optional`,
+replacing the `is not None` / `Bool(opt)` guard + `.value()` dance:
 
 ```mojo
-if case .Some(item) = value:
-    use(item)                # no .value() / is_some() dance
+# WRONG: guard-then-unwrap
+if sink_weight is not None:
+    sink_logit = sink_weight.value()
+
+var stored = get_global_or_null(key)
+if not stored or Int(stored.value()) != Int(record):
+    raise Error("missing")
+
+# CORRECT: the pattern IS the guard; the payload binds inline
+if case .Some(w) = sink_weight:
+    sink_logit = w
+
+if case .Some(s) = get_global_or_null(key):
+    if Int(s) != Int(record):
+        raise Error("missing")
 
 while case .Some(item) = get_next():   # consume while it yields
     process(item)
 ```
+
+`if case` composes with the else-arm discipline: an unwrap in one branch of
+a larger conditional chain stays readable as
+`if case .Some(x) = opt: ... elif <other cond>: ...`. Prefer it even when
+the guard is `comptime` (`comptime if case .Some(fn) = wrapper:`).
 
 Both compose with `comptime` — parameters bind as parameters:
 
