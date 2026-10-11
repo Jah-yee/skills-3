@@ -247,7 +247,297 @@ Remaining `raw_load`/`raw_store` uses need a tracking issue.
   t"expected {expected_dtype} but got {actual_dtype}"
   ```
 
-## 10. Naming
+## 10. Pattern matching: `match` over `elif` chains
+
+`match` (and `comptime match`, `if case`, `while case`) are stabilized. When
+several cases dispatch on one subject, a `match` replaces the `elif` chain.
+When the arms poke at unrelated expressions, keep `if`/`elif`. Two safety
+conditions before rewriting: `match` evaluates its subject **once** and each
+case sees that snapshot, so a ladder whose arms re-evaluate or mutate the
+subject between tests is not equivalent; and a `comptime match` is the form
+for parameter-driven specialization — a runtime `match` on parameters
+compiles both sides of every arm.
+
+```mojo
+# WRONG: elif ladder over one subject
+if dtype == .float32:
+    return 1
+elif dtype == .float16 or dtype == .bfloat16:
+    return 2
+else:
+    return 3
+
+# CORRECT
+match dtype:
+    case .float32:
+        return 1
+    case .float16 | .bfloat16:
+        return 2
+    case _:
+        return 3
+```
+
+The subject is evaluated once; cases are tried in order. For a parameter
+subject, `comptime match` guarantees compile-time dispatch and binds names
+as parameters (no `var`/`ref` there — they're meaningless and rejected).
+Two hard rules for the comptime form: the subject must be a compile-time
+value (a parameter or comptime expression — `comptime match` on a runtime
+argument is "cannot use a dynamic value in 'match' subject"; use a runtime
+`match` there), and guards must be compile-time evaluable too.
+
+```mojo
+comptime match (m, n, k):
+    case (16, 16, 16):
+        ...                      # hand-tuned 16³ path
+    case (mt, nt, kt) if mt * nt <= 256:
+        ...                      # bound sizes usable as parameters
+    case _:
+        ...
+```
+
+The most common kernel shape is a `dtype` (parameter) or enum-value
+(`X.tag`) dispatch. The mechanical rewrite — `.NAME` arms for a `DType`
+parameter, `== value` arms for an `Int` tag:
+
+```mojo
+# WRONG                                          # CORRECT
+comptime if dtype == .float32:                    comptime match dtype:
+    path_f32()                                        case .float32:
+elif dtype == .float16 or dtype == .bfloat16:              path_f32()
+    path_f16()                                    case .float16 | .bfloat16:
+else:                                                  path_f16()
+    comptime assert False, "unsupported"          case _:
+                                                      comptime assert False, (
+                                                          t"unsupported {dtype}"
+                                                      )
+```
+
+### Pattern forms
+
+```mojo
+match x:
+    case 0 | 1 | 2:              # literals + or-patterns
+    case == expected:            # compare against a value/expression; see below
+    case == (expected + 1):
+    case n if n < 0:             # guard; never counts toward exhaustiveness
+    case (0, y):                 # tuples, nested arbitrarily
+    case Point(x=x, y=0):        # struct fields by name
+    case {}:                     # initializer-list pattern: constructs a
+    case {1, offset=2}:          #   subject-type value and compares it
+    case (0, var x) | (var x, 1):# or-pattern: same names bound on every
+    case .Some(0):               #   alternative (payload-less cases bind none)
+    case .Some(ref v):           # ref into a mutable payload writes back
+    case var y:                  # owned copy (mutable); bare name is imm
+    case 0 as n:                 # bind the whole subject after testing it
+    case _:                      # wildcard; irrefutable, closes the match
+```
+
+### `== expr` — when an arm needs it
+
+Use the arm's native spelling when it compares on its own; add `==` only
+where the grammar requires it. Compiler-verified matrix:
+
+| Arm                                   | Compares alone? | Notes |
+|---------------------------------------|-----------------|-------|
+| `case 1:` / `case "a":` / `case True:` | yes | `== 1:` **warns "redundant"** |
+| `case -1:` (negative literal)          | no — error      | write `case == -1:` |
+| `case .Some(0):` / `case DType.int32:` / `case _Ops.BARRIER.value:` | yes | enum tags and any dotted path compare; no `==` |
+| `case LOAD_DRAM:` (bare name)          | **binds**       | even a comptime alias — silently shadows, later arms warn unreachable; write `case == LOAD_DRAM:` |
+| `case e + 1:` / `case a[i]:` / calls  | no — error      | write `case == (e + 1):` |
+| `case == None:`                       | —               | `None` isn't a plain literal; `==` required |
+
+The rule: **a dotted path or enum case compares; a bare name binds; everything
+else needs `==`.** It recurses into payloads (`.Some(expected)` binds;
+`.Some(== expected)` compares).
+
+```mojo
+# WRONG: binds x to a new name W; doesn't compare
+match x:
+    case W:
+    case _:
+
+# CORRECT — == only where required
+match x:
+    case == W:                    # bare name: == required
+    case _Ops.BARRIER.value:      # dotted path: no ==
+    case == (expected + 1):       # expression: == required
+    case _:
+```
+
+Types are comptime values, so `comptime match T` with `== Type` arms is the
+"type switch". No `is` — `==` is type identity in Mojo:
+
+```mojo
+comptime match type_of(x):       # builtin is `type_of`; `typeof` doesn't parse
+    case == Float32 | == Float64:
+        ...
+    case _:
+        ...
+
+# For a single type question, comptime if reads better:
+comptime if type_of(x) == Float32:
+    ...
+```
+
+You can't hoist `==` alternatives into a shared set (`== FPTypes` compares
+against the set value) or put predicates inside patterns — spell each `== T`
+out, and move trait questions to a guard on the *dtype* value
+(`case dt if dt.is_floating_point():` — a bound *type* has no such method)
+or a plain `comptime if`.
+
+### Enum-disguise structs: conform to `EnumLike`
+
+When a match (or would-be elif ladder) dispatches on a struct whose logical
+cases are `comptime Self(...)` constants — a struct acting as an enum —
+conform it to `EnumLike` and use `.CASE` arms: discriminant dispatch instead
+of the struct's `__eq__`, plus exhaustive-match diagnostics. Contract members:
+
+|Member|Contract|
+|---|---|
+|`_enum_case_names`|`ParameterList.of[...].values`: constant names in case-index order.|
+|`_enum_case_types`|`TypeList` values in the same order; `NoneType` for payload-less cases.|
+|`_get_enum_discriminant(self) -> Int`|Map the backing value to its case index.|
+|`_unsafe_get_enum_payload[id: Int](ref self)`|Return `ref[self] TypeList[Trait=AnyType, Self._enum_case_types]()[id]`; payload-less enums `comptime assert False`.|
+
+If unnamed backing values can exist (e.g. a `-1` "unsupported" sentinel),
+set `comptime _enum_is_exhaustive = False` and keep `case _`. For
+string-backed structs, map strings to case indices in
+`_get_enum_discriminant` (a runtime `match self.name:` is fine);
+`_enum_case_names` lists the **constant names**, not the backing strings.
+In-tree conformances: `TuningGroup`, `FlashAttentionAlgorithm`, `GEMMKind`.
+Recent conversions of the same shape: `UMMAKind`, `MaskName` (see the
+kernel PRs applying this rule).
+
+```mojo
+# WRONG — Kind is a struct with FIRST/SECOND constants but no EnumLike
+if kind == Kind.FIRST:
+    return 10
+elif kind == Kind.SECOND:
+    return 20
+else:
+    return -1
+
+# CORRECT — unnamed backing values remain possible
+@fieldwise_init
+struct Kind(EnumLike, TrivialRegisterPassable):
+    var value: Int32
+    comptime FIRST = Self(0)
+    comptime SECOND = Self(1)
+    comptime _enum_is_exhaustive = False
+    comptime _enum_case_names = ParameterList.of[
+        "FIRST".value, "SECOND".value
+    ].values
+    comptime _enum_case_types = TypeList.splat[2, NoneType].values
+
+    def _get_enum_discriminant(self) -> Int:
+        return Int(self.value)
+
+    def _unsafe_get_enum_payload[
+        id: Int
+    ](ref self) -> ref[self] TypeList[
+        Trait=AnyType, Self._enum_case_types
+    ]()[id]:
+        comptime assert False, "Kind has no payload"
+
+def classify(kind: Kind) -> Int:
+    match kind:
+        case .FIRST:
+            return 10
+        case .SECOND:
+            return 20
+        case _:
+            return -1
+```
+
+### Exhaustiveness and warnings
+
+The compiler warns on non-exhaustive `EnumLike` subjects (incl. `Bool` and
+tuples of those), on duplicate cases, and on unreachable arms. Guards never
+contribute coverage, so a `case _ if cond:` is **not** a catch-all. In
+kernels, prefer an exhaustive match with a `case _:` that `comptime assert`s,
+so a new enum value fails at build time, not in production:
+
+```mojo
+comptime match dtype:
+    case .float32 | .float64:
+        ...
+    case _:
+        comptime assert False, t"unsupported dtype {dtype}"
+```
+
+Once every case of a runtime match is covered, a trailing `case _:` warns
+unreachable — drop it. Open enums (`_enum_is_exhaustive = False`) still need
+`case _`; covering the known cases doesn't close an open set.
+
+The coverage model (what counts as "covered"):
+
+| Subject / pattern                            | Coverage behavior |
+|----------------------------------------------|-------------------|
+| `case _` or bare binding                     | irrefutable — closes the whole space |
+| `case X if cond:` (any guard)                | never counts toward coverage |
+| `case .Some(0):`                             | doesn't cover `Some` (payload refined) |
+| `case .Some(_):`                             | covers `Some` |
+| `case (True, True):` on `Bool × Bool`        | covers the one combination; `(False, False)` next to it still leaves two cells open — coverage is per-combination, not per-field |
+| open enum (`_enum_is_exhaustive = False`)     | known cases never close the set; `case _` stays reachable |
+| `Int`/`String` literals                      | duplicates warn, but no exhaustivity requirement |
+
+"No warning" is not proof of exhaustive or non-redundant dispatch: refined
+payload duplicates and nested open-type literals aren't diagnosed, and
+literal identity is spelling-based (`4` vs `0x4` are different keys).
+
+### `if case` / `while case`
+
+`if case pattern = value:` evaluates the value once, tests one pattern, and
+binds names for that block only; failure falls to the next `elif`/`else`.
+It's the `if let` idiom — use it to unwrap instead of
+`if opt: use(opt.value())`:
+
+```mojo
+if case .Some(item) = value:
+    use(item)                # no .value() / is_some() dance
+
+while case .Some(item) = get_next():   # consume while it yields
+    process(item)
+```
+
+Both compose with `comptime` — parameters bind as parameters:
+
+```mojo
+comptime if case == Int = T:
+    ...
+elif case == String = T:
+    ...
+else:
+    ...
+```
+
+An or-pattern binding must bind the same name compatibly on every
+alternative; `ref` binds a reference to whichever element matched, and it
+keeps the subject's mutability:
+
+```mojo
+match point:
+    case (2, ref x) | (ref x, 3):
+        use(x)                  # x references point[1] or point[0]
+    case _:
+        ...
+```
+
+### Review checks
+
+- A chain of 2+ `elif x == ...` arms on one subject becomes a `match` —
+  unless arms re-evaluate or mutate the subject between tests; `match`
+  snapshots the subject once.
+- `elif` chains over unrelated expressions stay `if`/`elif`. Parameter
+  subjects take `comptime match`.
+- A bare name in a pattern binds; if a comparison was meant, use `== name`
+  (enum cases excepted: `case Color.red:` / `case .red:`).
+- Guarded cases don't count toward exhaustiveness; missing *coverage* warns
+  (a covered match's trailing `case _:` warns unreachable instead).
+- `ref` bindings need a memory origin — `case ref y:` on a register-passable
+  subject is an error; use it inside tuples or mutable enum payloads.
+
+## 11. Naming
 
 - No vendor or device class in generic APIs (`CompilationTarget(MI355X)`,
   not a `gpu_`-prefixed variant).
@@ -256,7 +546,7 @@ Remaining `raw_load`/`raw_store` uses need a tracking issue.
 - Descriptive over cryptic (`tA`, `tR` get flagged).
 - Always declare locals with `var`.
 
-## 11. API design
+## 12. API design
 
 - `Optional[T]` instead of sentinel defaults.
 - One generic entry point (`is[NVIDIA_GPU]()`) over a growing set of
@@ -269,7 +559,7 @@ Remaining `raw_load`/`raw_store` uses need a tracking issue.
 - Use named results with `rebind[type_of(out)](x)` instead of restating
   a long return type (only when the rebind is otherwise required).
 
-## 12. Invariants and hardware facts
+## 13. Invariants and hardware facts
 
 - Query constants (`WARP_SIZE`, device limits); don't hard-code `32` or
   `128`.
@@ -286,7 +576,7 @@ Remaining `raw_load`/`raw_store` uses need a tracking issue.
   data copied back to the host, and must handle `M == 0` warmup launches.
 - Declare `MAX_THREADS_PER_BLOCK_METADATA` to match the real block size.
 
-## 13. Write portable kernels; gate only what's vendor-specific
+## 14. Write portable kernels; gate only what's vendor-specific
 
 Specializing a kernel for one vendor is fine when it uses that vendor's
 hardware (TMA, WGMMA, tcgen05 on NVIDIA; MFMA, `lgkmcnt` waits on AMD;
@@ -323,9 +613,9 @@ gpu_constraints = ["//:has_gpu"],
   naming the failure (a missing intrinsic or a numerics gap), not just
   "NVIDIA only" or "AMD only".
 - Don't hard-code one vendor's facts (warp size 32 vs 64, shared memory
-  size) in generic code; see §12.
+  size) in generic code; see §13.
 
-## 14. Hygiene
+## 15. Hygiene
 
 - Every temporary hack or API abuse gets a `TODO(<ticket>)` linking a
   filed issue.

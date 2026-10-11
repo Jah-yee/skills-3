@@ -622,9 +622,12 @@ except err:                               # err is Int
     print("error code:", err)
 ```
 
-No `match` statement. Async is spelled `__async def` and `__await` (bare
-`async`/`await` still parse but warn that async is unstable); support is
-unfinished and its types are private — do not write async Mojo yet.
+`match` / `comptime match` / `if case` / `while case` are stabilized — see
+[idiomatic-mojo.md §10](references/idiomatic-mojo.md) for the pattern forms
+and when to prefer them over `elif` chains. Async is spelled `__async def`
+and `__await` (bare `async`/`await` still parse but warn that async is
+unstable); support is unfinished and its types are private — do not write
+async Mojo yet.
 
 ## Function types and closures
 
