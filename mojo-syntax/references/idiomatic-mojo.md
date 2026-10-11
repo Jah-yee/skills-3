@@ -485,12 +485,36 @@ The coverage model (what counts as "covered"):
 payload duplicates and nested open-type literals aren't diagnosed, and
 literal identity is spelling-based (`4` vs `0x4` are different keys).
 
-### `if case` / `while case`
+### `if case` / `while case` / `or_else`
 
-`if case pattern = value:` evaluates the value once, tests one pattern, and
-binds names for that block only; failure falls to the next `elif`/`else`.
-It's the `if let` idiom — the preferred way to unwrap an `Optional`,
-replacing the `is not None` / `Bool(opt)` guard + `.value()` dance:
+Pick by shape, in order:
+
+- **Fallback to a default** → `opt.or_else(default)`. One expression, no
+  branch: `var global_rank = my_rank.or_else(Int(ctx.id()))`. Works on
+  runtime and comptime Optionals alike. This replaces the
+  `opt.value() if opt else default` ternary and the two-line
+  default-then-overwrite dance.
+- **Branch on presence** (use the payload only when it exists, other
+  control flow otherwise) → `if case .Some(x) = opt:`. The pattern is the
+  guard AND the binding.
+- **Dispatch on the payload's shape** (multiple cases, or the None side
+  carries its own logic) → `match opt: case .Some(x): ... case .None: ...`.
+- Presence guaranteed by construction (an enclosing condition already
+  proves it, and absence is a caller bug)? Keep `.value()` — it aborts
+  loudly instead of silently skipping work.
+```mojo
+# WRONG: guard-then-unwrap
+var global_rank = my_rank.value() if my_rank else Int(ctx.id())
+
+# CORRECT: fallback is one expression
+var global_rank = my_rank.or_else(Int(ctx.id()))
+```
+
+For the branch-on-presence shape, `if case pattern = value:` evaluates the
+value once, tests one pattern, and binds names for that block only; failure
+falls to the next `elif`/`else`. The pattern is both the guard and the binding,
+so it unwraps an `Optional` without the `is not None` / `Bool(opt)` guard +
+`.value()` dance:
 
 ```mojo
 # WRONG: guard-then-unwrap
