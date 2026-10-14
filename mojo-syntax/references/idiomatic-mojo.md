@@ -182,6 +182,12 @@ shows which arguments are outputs. Question every `MutAnyOrigin`.
 src: Pointer[Float32, MutAnyOrigin]            src: ImmPointer[Float32, _]
 ```
 
+A caller holding mutable data doesn't make the parameter mutable. A
+mutable value converts implicitly to an immutable parameter with a
+generic origin (`ImmTileTensor[dtype, L, _]`); with a concrete origin
+such as `ImmutAnyOrigin`, the caller passes `.as_imm()`. Never widen a
+read-only parameter to `mut=True` to match a caller.
+
 Loads from immutable data are invariant by default; don't pass
 `invariant=True` or other no-op arguments. Prefer the named type prefixes
 to describe the mutability of the underlying data such as `ImmPointer`,
