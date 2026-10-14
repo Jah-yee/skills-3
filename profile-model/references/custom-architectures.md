@@ -67,9 +67,9 @@ pixi run max generate \
 
 Per-flag, and why each matters here:
 
-- `--no-device-graph-capture`: without it, MAX compiles a full
-  device-graph at `max_batch_size=512`, which can take minutes for a one-shot
-  profile. Disable it so you reach the profiled run quickly.
+- `--no-device-graph-capture`: older MAX releases otherwise compile a full
+  device graph at `max_batch_size=512`, which can take minutes. Newer
+  releases leave capture off for `max generate`.
 - `--custom-architectures /abs/path/to/<dir>`: point at the architecture
   directory. MAX adds its parent to `sys.path` and imports the dir name as a
   package.
