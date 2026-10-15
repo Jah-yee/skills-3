@@ -26,8 +26,8 @@ Requires `pixi run max serve` with `--custom-architectures <port_dir>` (the slug
 folder, not its parent). The probes read logprobs, which the overlap
 scheduler rejects with HTTP 400. MAX enables that scheduler unless `arch.py`
 sets `supports_overlap_scheduler=False`. For other ports, add both
-`--no-enable-overlap-scheduler` and `--force` to the serve command: MAX
-ignores the first flag without the second.
+`--no-enable-overlap-scheduler` and `--force` to the serve command: MAX 26.6
+and earlier ignore the first flag without the second.
 
 Flags:
 
