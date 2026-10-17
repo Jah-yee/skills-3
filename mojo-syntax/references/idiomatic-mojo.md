@@ -328,8 +328,8 @@ match x:
     case n if n < 0:             # guard; never counts toward exhaustiveness
     case (0, y):                 # tuples, nested arbitrarily
     case Point(x=x, y=0):        # struct fields by name
-    case {}:                     # initializer-list pattern: constructs a
-    case {1, offset=2}:          #   subject-type value and compares it
+    case {x=0, y=0}:             # subject-typed fields by name
+    case == {1, offset=2}:       # compare against an initializer-list value
     case (0, var x) | (var x, 1):# or-pattern: same names bound on every
     case .Some(0):               #   alternative (payload-less cases bind none)
     case .Some(ref v):           # ref into a mutable payload writes back
@@ -347,6 +347,7 @@ where the grammar requires it. Compiler-verified matrix:
 |---------------------------------------|-----------------|-------|
 | `case 1:` / `case "a":` / `case True:` | yes | `== 1:` **warns "redundant"** |
 | `case -1:` (negative literal)          | no — error      | write `case == -1:` |
+| `case {1, 2}:` (initializer list)      | no — error      | name the subject fields, such as `case {x=1, y=2}:` |
 | `case .Some(0):` / `case DType.int32:` / `case _Ops.BARRIER.value:` | yes | enum tags and any dotted path compare; no `==` |
 | `case LOAD_DRAM:` (bare name)          | **binds**       | even a comptime alias — silently shadows, later arms warn unreachable; write `case == LOAD_DRAM:` |
 | `case e + 1:` / `case a[i]:` / calls  | no — error      | write `case == (e + 1):` |
