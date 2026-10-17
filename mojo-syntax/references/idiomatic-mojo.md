@@ -194,13 +194,13 @@ to describe the mutability of the underlying data such as `ImmPointer`,
 `MutPointer`, `ImmTileTensor`, and `MutTileTensor` over the `mut=True`
 or `mut=False` prefix.
 
-## 8. TileTensor over LayoutTensor and raw pointers
+## 8. TileTensor over raw pointers
 
-New and migrated kernels use TileTensor, coordinate indexing, and slice
-syntax instead of flat pointer offsets. Direct pointer access was a
-workaround for LayoutTensor and NDBuffer performance cliffs (they carried
-dead bytes); a fully static TileTensor has the same ABI as a pointer, so
-index the tensor directly.
+Kernels use TileTensor, coordinate indexing, and slice syntax instead of
+flat pointer offsets. Direct pointer access was a workaround for the
+performance cliffs of the earlier tensor types (they carried dead bytes);
+a fully static TileTensor has the same ABI as a pointer, so index the
+tensor directly.
 
 ```mojo
 # WRONG                                   # CORRECT
