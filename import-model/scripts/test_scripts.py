@@ -170,8 +170,11 @@ def test_architectures_root_namespace(
         ("phi3_modulev3", True),
         ("granite_modulev3", True),
         ("deepseekV3_modulev3", True),
+        # No KV cache: subclasses PipelineModel, not a ModuleV3 base.
+        ("mpnet_modulev3", True),
         # Architectures without a ModuleV3 pipeline model.
         ("llama3", False),
+        ("mpnet", False),
         ("gemma3", False),
         ("deepseekV3", False),
     ],

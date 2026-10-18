@@ -29,9 +29,12 @@ from typing import NamedTuple
 ARCH_PACKAGE = "max.pipelines.architectures"
 
 # Every ModuleV3 pipeline model base in ``max.pipelines.lib`` carries this
-# prefix: ``ModuleV3PipelineModel``, ``ModuleV3PipelineModelWithKVCache``,
+# prefix: ``ModuleV3PipelineModelWithKVCache``,
 # ``ModuleV3MultiGraphPipelineModelWithKVCache``.
 _MODULEV3_BASE_PREFIX = "ModuleV3"
+# ModuleV3 models without a KV cache subclass ``PipelineModel`` directly and
+# build their module in this method.
+_MODULEV3_BUILD_METHOD = "_instantiate_module"
 # Bound on base-class hops across architecture packages. Real chains are
 # two or three deep (phi3_modulev3 -> llama3_modulev3 -> lib base).
 _MAX_CLASS_DEPTH = 8
@@ -330,9 +333,15 @@ def is_modulev3_lineage(
 
     ``lineage`` is what :func:`class_lineage` yields for the pipeline model.
     True when one of those classes subclasses a ``ModuleV3*PipelineModel*``
-    base in ``max.pipelines.lib``.
+    base in ``max.pipelines.lib`` or defines ``_instantiate_module``.
     """
     for _, node in lineage:
+        if any(
+            isinstance(stmt, ast.FunctionDef)
+            and stmt.name == _MODULEV3_BUILD_METHOD
+            for stmt in node.body
+        ):
+            return True
         for base in node.bases:
             name = base_name(base)
             if (
