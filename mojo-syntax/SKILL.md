@@ -329,7 +329,7 @@ table at the top). Most of the pointer API is being renamed alongside
 | Deprecated                | Replacement                             |
 |---------------------------|-----------------------------------------|
 | `UnsafePointer[T, O]`     | `Pointer[T, O]`                         |
-| `alloc[T](n)`             | `alloc(Layout[T](count=n))`             |
+| `alloc[T](n)`             | `alloc(Layout[T](length=n))`             |
 | `p.free()`                | `dealloc(allocation^)`                  |
 | `p[i]`                    | `p[unsafe_offset=i]`                    |
 | `p + i`                   | `p.unsafe_offset(i)`                    |
@@ -338,14 +338,14 @@ table at the top). Most of the pointer API is being renamed alongside
 | `p.init_pointee_move(v)`  | `p.unsafe_write(v)`                     |
 | `p.init_pointee_copy(v)`  | `p.unsafe_write(copy=v)`                |
 
-`alloc(Layout[T](count=n))` returns an `Allocation[T]`, a linear type the
+`alloc(Layout[T](length=n))` returns an `Allocation[T]`, a linear type the
 compiler forces you to dispose of on every path — pass it to `dealloc`, or call
 `unsafe_leak()` to take ownership of the bare pointer:
 
 ```mojo
 from std.memory import Layout, dealloc
 
-var allocation = alloc(Layout[Int32](count=4))
+var allocation = alloc(Layout[Int32](length=4))
 var ptr = allocation.unsafe_ptr()
 ptr.unsafe_write(Int32(1))
 ptr.unsafe_offset(1).unsafe_write(Int32(2))
@@ -363,7 +363,7 @@ struct Buffer[T: AnyType]:
     var _alloc: Allocation[Self.T]
 
     def __init__(out self, size: Int):
-        self._alloc = alloc(Layout[Self.T](count=size))
+        self._alloc = alloc(Layout[Self.T](length=size))
 
     def __deinit__(deinit self):
         dealloc(self._alloc^)
