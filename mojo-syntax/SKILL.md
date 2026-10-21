@@ -65,7 +65,8 @@ kernels).
 | `Tensor[T]`                                      | Not in stdlib (use SIMD, List, Pointer)                                          |
 | `MutUnsafePointer` / `ImmUnsafePointer`          | `MutPointer` / `ImmPointer`                                                      |
 | `OptionalUnsafePointer`                          | `OptionalPointer`                                                                |
-| `escaping` closures                              | Unified closures (`def(...) -> T`, captures in `{}`); `capturing[_]` still valid |
+| `escaping` closures                              | Unified closures (`def(...) -> T`, captures in `{}`)                             |
+| `capturing`, `@__parameter`, `@__copy_capture`   | Capture list `{imm}` / `{var x}` / `{mut x}`; pass the closure as a value        |
 | `__del__(deinit self)`                           | `__deinit__(deinit self)`                                                        |
 
 ## `var` is required for every new declaration
@@ -632,25 +633,24 @@ async Mojo yet.
 ## Function types and closures
 
 No lambda. Closures use bare `def` with a capture list in `{}` after the arg
-list. `escaping` is removed; `capturing[_]` is still valid on parametric
-closure-type params:
+list. `escaping`, `capturing`, `@__parameter`, and `@__copy_capture` are
+removed:
 
 ```mojo
-comptime MyFn = def(Int) -> None                  # unified value type
-def runner[f: def(Int) capturing[_] -> None](): ...  # parametric form
+comptime MyFn = def(Int) -> None                  # closure trait
+def runner[F: def(Int) -> None](f: F): ...        # closures are values
+def apply[f: def(Int) thin -> Int](): ...         # comptime fn: must be thin
 
 def closure(i: Int) {mut count, imm ptr, var x}:  # captures: mut/imm/var
     count += ptr[i] + x^                          # `^` at use site, not in `{}`
 
-vectorize[simd_width](size, closure)              # runtime-arg overload
+vectorize[simd_width](size, closure)
 ```
 
 `imm` is default. `var x` is owned — transfer with `x^` at the use site.
-Prefer unified closures with a capture list. Do not use `@__parameter` /
-`@parameter` on nested closures in new or migrated code — the legacy form is
-slated for removal. Pass closures as runtime arguments (`f(my_closure)`)
-where possible; if an API requires a comptime `capturing[_]` function, use
-`def … capturing` without `@__parameter`, or migrate that API.
+A closure with captures is a runtime value, so pass it as an argument
+(`f(my_closure)`). Only a `thin` function (no captures) can be a
+compile-time parameter.
 
 ## Type hierarchy
 

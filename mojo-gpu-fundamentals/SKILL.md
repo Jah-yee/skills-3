@@ -583,26 +583,27 @@ var buf = DeviceBuffer[dtype](ctx, raw_ptr, count, owning=False)
 from std.benchmark import Bench, BenchConfig, Bencher, BenchId, BenchMetric, ThroughputMeasure
 from max.benchmark import bencher_iter_custom   # GPU form: a free function
 
+var ctx = DeviceContext()
+
 @inline(.always)
-def bench_fn(mut b: Bencher) raises capturing[_]:
+def bench_fn(mut b: Bencher) raises {imm}:
     @inline(.always)
     def launch(ctx: DeviceContext) raises {imm}:
         ctx.enqueue_function[kernel](args, grid_dim=G, block_dim=B)
-    var ctx = DeviceContext()
-    # Value-taking form: pass the launch closure as an argument.
     bencher_iter_custom(b, launch, ctx)         # NOT `b.iter_custom(...)`
 
 var bench = Bench(BenchConfig(max_iters=50000))
-bench.bench_function[bench_fn](
+bench.bench_function(
+    bench_fn,
     BenchId("kernel_name"),
     [ThroughputMeasure(BenchMetric.bytes, total_bytes)],
 )
 ```
 
 `Bencher.iter_custom` takes no `DeviceContext` — that form lives in
-`max.benchmark`. Prefer `bencher_iter_custom(b, launch, ctx)` with a unified
-closure and an explicit capture list (`{imm}`, `{var}`, or named captures).
-Do not use `@__parameter` / `@parameter` on these launch closures.
+`max.benchmark`. Both the bench function and the launch closure are passed
+as values; give each an explicit capture list (`{imm}`, `{var}`, or named
+captures).
 
 ## Hardware details
 
