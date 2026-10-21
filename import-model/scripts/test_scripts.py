@@ -210,12 +210,8 @@ def test_native_mapping_reads_every_registration() -> None:
     mapping = max_arch_paths.list_native_arch_mapping(_ARCHS)
     assert {"qwen3", "qwen3_embedding"} <= set(mapping["Qwen3ForCausalLM"])
     assert mapping.get("Qwen3MoeForCausalLM") == ["qwen3"]
-    assert mapping.get("UnifiedMTPDeepseekV3ForCausalLM") == [
-        "unified_mtp_deepseekV3"
-    ]
-    assert mapping.get("UnifiedDflashMiMoV2ForCausalLM") == [
-        "unified_dflash_mimo_v2"
-    ]
+    assert mapping.get("Eagle3MHADeepseekV3DraftModel") == ["eagle3_deepseekV3"]
+    assert mapping.get("MiMoV2DFlashContextForCausalLM") == ["dflash_mimo_v2"]
 
 
 @needs_tree

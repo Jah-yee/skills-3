@@ -266,7 +266,7 @@ def supported_architecture_calls(tree: ast.Module) -> Iterator[ast.Call]:
 
 
 # ``replace`` is ``dataclasses.replace``, which derives one registration
-# from another: ``replace(mimo_v2_arch, name="UnifiedDflashMiMoV2...")``.
+# from another: ``replace(mimo_v2_arch, name="MiMoV2DFlashContext...")``.
 _REGISTRATIONS = frozenset({"SupportedArchitecture", "Speculator", "replace"})
 
 
