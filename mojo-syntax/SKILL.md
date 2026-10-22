@@ -467,7 +467,7 @@ var x = values[i][T].copy()          # or `^` to transfer
 | `@staticmethod`                                  | Static method                           |
 | `@deprecated("msg")`                             | Deprecation warning                     |
 | `@doc_hidden`                                    | Hide from docs                          |
-| `@explicit_destroy`                              | Linear type (no implicit destruction)   |
+| `@explicit_destroy("msg")` (traits only)         | Linear trait; structs: `not Deinitable` |
 
 ## Contextual member references — prefer `.member`
 
